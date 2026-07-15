@@ -1,6 +1,6 @@
 # auto-grants-integrated 詳細設計書
 
-> **Version**: 1.1 (Revised)  
+> **Version**: 1.2 (Revised)  
 > **更新日**: 2026-07-15  
 > **ステータス**: Draft
 
@@ -173,3 +173,266 @@ class MockEmbeddingService(EmbeddingServiceBase):
 ## 4. データベース移行設計 (SQLite -> PostgreSQL)
 
 (前バージョンと同様のため省略。)
+
+---
+
+## 5. 予算データフェッチャー詳細設計 (`budget_fetch.py`)
+
+### 5.1 クラス構成と処理フロー
+
+```python
+import pdfminer.high_level
+import openpyxl
+import httpx
+
+class BudgetFetcher:
+    """
+    国・自治体の予算PDF/Excel/APIからデータを取得し、
+    nodes/edges グラフ構造としてDBにUpsertする。
+    """
+    def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient):
+        self.db = db_client
+        self.llm = llm_client
+        self.sources = self._load_data_sources()
+
+    async def run(self) -> CollectorResult:
+        total_nodes = 0
+        total_edges = 0
+
+        for source in self.sources:
+            # 1. データ取得 (PDF/Excel/API)
+            raw_text = await self._fetch_source(source)
+            if not raw_text:
+                continue
+
+            # 2. LLMによる省庁別・事業別予算額の構造化抽出
+            budget_items = await self._extract_budget_via_llm(raw_text, source)
+
+            # 3. nodes/edges への変換とUpsert
+            n, e = await self._upsert_graph(budget_items, source)
+            total_nodes += n
+            total_edges += e
+
+            # 4. 助成金データとの自動紐付け
+            await self._link_grants_to_edges(budget_items)
+
+        await self._save_run_log(total_nodes, total_edges)
+        return CollectorResult(
+            status="success",
+            items_found=total_edges,
+            message=f"Upserted {total_nodes} nodes, {total_edges} edges"
+        )
+```
+
+### 5.2 LLM構造化抽出プロンプト
+
+```python
+    async def _extract_budget_via_llm(self, text: str, source: DataSource) -> list[dict]:
+        prompt = f"""
+以下の予算資料のテキストを解析し、各予算項目を以下のJSON形式で抽出してください。
+
+出力JSON形式:
+[
+  {{
+    "source_entity": "送金元のエンティティ名 (例: 一般会計)",
+    "target_entity": "送金先のエンティティ名 (例: こども家庭庁)",
+    "amount_jpy": 金額(円),
+    "fiscal_year": 会計年度,
+    "sub_category": "詳細分類 (例: 子育て支援)",
+    "page_number": 参照ページ番号,
+    "confidence": 1.0
+  }}
+]
+
+注意:
+- 金額は円単位で出力 (兆円→円へ変換)
+- 公式PDFから直接読み取れる値は confidence: 1.0
+- LLMが推計した配分値は confidence: 0.7
+- 参照ページ番号が特定できない場合は null
+
+テキスト:
+{text[:50000]}
+        """
+        return await self.llm.generate_json(prompt)
+```
+
+### 5.3 nodes/edges Upsert ロジック
+
+```python
+    async def _upsert_graph(self, budget_items: list[dict], source: DataSource) -> tuple[int, int]:
+        node_count = 0
+        edge_count = 0
+
+        for item in budget_items:
+            # source_entity を node として Upsert
+            source_id = self._generate_node_id(item["source_entity"])
+            await self.db.execute("""
+                INSERT INTO nodes (id, name, type, dataset)
+                VALUES (:id, :name, :type, :dataset)
+                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+            """, {
+                "id": source_id,
+                "name": item["source_entity"],
+                "type": self._infer_node_type(item["source_entity"]),
+                "dataset": source.name
+            })
+            node_count += 1
+
+            # target_entity を node として Upsert
+            target_id = self._generate_node_id(item["target_entity"])
+            await self.db.execute("""
+                INSERT INTO nodes (id, name, type, dataset)
+                VALUES (:id, :name, :type, :dataset)
+                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name
+            """, {
+                "id": target_id,
+                "name": item["target_entity"],
+                "type": self._infer_node_type(item["target_entity"]),
+                "dataset": source.name
+            })
+            node_count += 1
+
+            # edge を Upsert (source_id + target_id + fiscal_year で一意)
+            await self.db.execute("""
+                INSERT INTO edges (source_id, target_id, category, sub_category,
+                                   value_jpy, fiscal_year, confidence, source_dataset)
+                VALUES (:src, :tgt, :cat, :sub, :val, :fy, :conf, :ds)
+                ON CONFLICT ON CONSTRAINT uq_edges_src_tgt_fy
+                DO UPDATE SET value_jpy = EXCLUDED.value_jpy,
+                              confidence = EXCLUDED.confidence
+            """, {
+                "src": source_id, "tgt": target_id,
+                "cat": "welfare", "sub": item.get("sub_category"),
+                "val": item["amount_jpy"], "fy": item["fiscal_year"],
+                "conf": item.get("confidence", 0.7),
+                "ds": source.name
+            })
+            edge_count += 1
+
+        return node_count, edge_count
+```
+
+---
+
+## 6. サンキーダイアグラム用データ変換設計
+
+DB上の `nodes`/`edges` を `@nivo/sankey` が受け付ける JSON フォーマットに変換する API エンドポイントを提供する。
+
+### 6.1 API エンドポイント
+
+```
+GET /api/v1/flow/sankey?fiscal_year=2025&categories=welfare,subsidy_grant&min_value_jpy=10000000&limit=50
+```
+
+### 6.2 レスポンス形式 (@nivo/sankey 互換)
+
+```typescript
+interface SankeyResponse {
+  nodes: { id: string; label: string; color?: string }[];
+  links: { source: string; target: string; value: number }[];
+}
+```
+
+### 6.3 変換ロジック (FastAPI / Prisma $queryRaw 想定)
+
+```python
+from fastapi import APIRouter, Query
+
+router = APIRouter(prefix="/api/v1/flow")
+
+@router.get("/sankey")
+async def get_sankey_data(
+    fiscal_year: int = Query(default=2025),
+    categories: str = Query(default=None),        # カンマ区切り
+    min_value_jpy: float = Query(default=0.0),    # 最小金額閾値 (描画保護用)
+    limit: int = Query(default=50),               # 最大エッジ取得数 (描画保護用)
+    db=Depends(get_db)                            # Prisma Client想定
+):
+    """
+    nodes/edges テーブルから @nivo/sankey 互換の JSON を生成する。
+    「国庫 → 省庁 → 予算事業 → 助成金 → 受給者」のチェーンを一本のサンキーとして返却。
+    描画パフォーマンス保護のため、デフォルトで上位50件の制限と閾値フィルタを設ける。
+    """
+    # カテゴリフィルタの組み立て
+    cat_filter = ""
+    params: dict = {
+        "fy": fiscal_year,
+        "min_val": min_value_jpy,
+        "limit": limit
+    }
+    if categories:
+        cat_list = [c.strip() for c in categories.split(",")]
+        cat_filter = "AND e.category = ANY(:cats)"
+        params["cats"] = cat_list
+
+    # edges とその両端の nodes を取得 (Prismaの $queryRaw / Raw SQL経由)
+    # ※ uq_edges_src_tgt_fy 一意制約によりデータ整合性を保証
+    query = f"""
+        SELECT e.source_id, e.target_id, e.value_jpy,
+               n1.name AS source_name, n1.type AS source_type,
+               n2.name AS target_name, n2.type AS target_type
+        FROM edges e
+        JOIN nodes n1 ON e.source_id = n1.id
+        JOIN nodes n2 ON e.target_id = n2.id
+        WHERE e.fiscal_year = :fy 
+          AND e.value_jpy >= :min_val
+          {cat_filter}
+        ORDER BY e.value_jpy DESC
+        LIMIT :limit
+    """
+    rows = await db.fetch_all(query, params)
+
+    # @nivo/sankey 形式へ変換
+    node_ids = set()
+    nodes = []
+    links = []
+
+    for row in rows:
+        for nid, name, ntype in [
+            (row["source_id"], row["source_name"], row["source_type"]),
+            (row["target_id"], row["target_name"], row["target_type"]),
+        ]:
+            if nid not in node_ids:
+                node_ids.add(nid)
+                nodes.append({
+                    "id": nid,
+                    "label": name,
+                    "color": _node_color(ntype),
+                })
+
+        links.append({
+            "source": row["source_id"],
+            "target": row["target_id"],
+            "value": row["value_jpy"],
+        })
+
+    return {"nodes": nodes, "links": links}
+
+
+def _node_color(node_type: str) -> str:
+    """node type に応じたデザインシステム色を返却。"""
+    colors = {
+        "country": "#5e5ce6",       # --color-primary
+        "mof_expenditure": "#706ffd",
+        "ministry": "#5e5ce6",
+        "subsidy": "#30d158",        # --color-accent-mint
+        "recipient_org": "#30d158",
+        "prefecture": "#64748b",
+    }
+    return colors.get(node_type, "#94a3b8")
+```
+
+---
+
+## 7. フロントエンド API エンドポイント一覧 (新規)
+
+| メソッド | エンドポイント | 説明 | ビュー |
+|---|---|---|---|
+| `GET` | `/api/v1/flow/sankey` | サンキーダイアグラム用データ (nodes/links) | Money Flow |
+| `GET` | `/api/v1/flow/globe` | 3D地球儀用データ (lat/lng 付きアーク) | Money Flow |
+| `GET` | `/api/v1/grants/list` | 助成金一覧 (フィルタリング・ソート・ページネーション) | Applications |
+| `GET` | `/api/v1/grants/{id}/detail` | 助成金詳細 + AI適合判定結果 | Applications モーダル |
+| `GET` | `/api/v1/grants/{id}/radar` | 4軸期待値レーダーチャートデータ | Applications モーダル |
+| `GET` | `/api/v1/dashboard/summary` | ダッシュボードサマリー (Active grants数・総申請額等) | Dashboard |
+| `GET` | `/api/v1/dashboard/timeline` | 予算カレンダータイムラインデータ | Dashboard |
+| `GET` | `/api/v1/dashboard/agent-status` | Modal AI エージェントの稼働ステータス | Dashboard |

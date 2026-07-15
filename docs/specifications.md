@@ -1,6 +1,6 @@
 # auto-grants-integrated 仕様書
 
-> **Version**: 1.2 (Revised)  
+> **Version**: 1.3 (Revised)  
 > **更新日**: 2026-07-15  
 > **ステータス**: Draft
 
@@ -40,6 +40,90 @@ ALTER TABLE knowledge_chunks
 DROP INDEX IF EXISTS idx_knowledge_chunks_embedding_hnsw;
 CREATE INDEX idx_knowledge_chunks_embedding_hnsw
     ON knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+```
+
+### 1.4 予算フローグラフテーブル（moneyflow-visualizerから移植・拡張）
+
+#### nodes（予算フローエンティティ）
+
+```sql
+CREATE TABLE nodes (
+    id TEXT PRIMARY KEY,                   -- 一意ID (例: 'JPN', 'MIN_CFA', 'SUB_CHILD_CARE')
+    name TEXT NOT NULL,                    -- 日本語表示名
+    name_en TEXT,                          -- 英語名
+    lat REAL,                              -- 緯度 (Globe表示用)
+    lng REAL,                              -- 経度 (Globe表示用)
+    region TEXT,                           -- 地域/分類
+    type TEXT NOT NULL,                    -- ノード種別 (下記参照)
+    dataset TEXT,                          -- 所属データセット
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_nodes_type ON nodes(type);
+```
+
+**ノード種別 (`type`) の定義:**
+
+| type | 説明 | 例 |
+|---|---|---|
+| `country` | 国家 | `JPN` (日本) |
+| `mof_expenditure` | 国庫歳出 | `EXP_SOCIAL` (社会保障関係費) |
+| `mof_revenue` | 国庫歳入 | `REV_TAX` (租税収入) |
+| `ministry` | 省庁 | `MIN_CFA` (こども家庭庁) |
+| `mhlw_benefit` | 社会保障制度 | `BEN_MEDICAL` (医療) |
+| `prefecture` | 都道府県 | `PREF_TOYAMA` |
+| `subsidy` | **助成金・補助金** (新設) | `SUB_CHILD_CARE` |
+| `recipient_org` | **採択組織** (新設) | `ORG_OCN` |
+
+#### edges（資金フロー）
+
+```sql
+CREATE TABLE edges (
+    id SERIAL PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES nodes(id),
+    target_id TEXT NOT NULL REFERENCES nodes(id),
+    category TEXT NOT NULL,                -- フロー分類 (下記参照)
+    sub_category TEXT,                     -- 詳細分類
+    value_usd REAL,                        -- 金額 (USD)
+    value_jpy REAL,                        -- 金額 (JPY)
+    fiscal_year INTEGER,                   -- 会計年度
+    confidence REAL DEFAULT 1.0,           -- 信頼度 (0.0-1.0)
+    source_dataset TEXT,                   -- データ出典名
+    grant_id INTEGER REFERENCES grants(id),-- 助成金との紐付け (nullable)
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT uq_edges_src_tgt_fy UNIQUE (source_id, target_id, fiscal_year)
+);
+
+CREATE INDEX idx_edges_source ON edges(source_id);
+CREATE INDEX idx_edges_target ON edges(target_id);
+CREATE INDEX idx_edges_category ON edges(category);
+CREATE INDEX idx_edges_fiscal_year ON edges(fiscal_year);
+```
+
+**カテゴリ (`category`) の定義:**
+
+| category | 説明 |
+|---|---|
+| `trade` | 貿易 |
+| `bop` | 国際収支 |
+| `remittance` | 送金/給付 |
+| `welfare` | 社会保障 |
+| `subsidy_grant` | **予算→助成金への紐付け** (新設) |
+| `subsidy_award` | **助成金→採択組織への交付** (新設) |
+
+#### data_sources（予算データソース登録）
+
+```sql
+CREATE TABLE data_sources (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,                    -- データソース名 (英語)
+    name_ja TEXT,                          -- 日本語名
+    url TEXT,                              -- URL
+    description TEXT,                      -- 説明
+    data_format TEXT,                      -- 形式 (API/JSON, PDF, Excel等)
+    fiscal_years TEXT,                     -- 対象年度
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 ```
 
 ---
@@ -88,6 +172,21 @@ CREATE INDEX idx_knowledge_chunks_embedding_hnsw
   - ダウンロードしたPDF/Excelファイルをテキスト化（PDFMiner、openpyxl等のライブラリを活用）し、構造化テキストに変換。
   - 抽出されたテキストを LLM (Claude) に入力し、「国の交付金 → 富山県の実施計画 → 富山市の事業計画」のつながりを解析し、`grant_cascade` テーブルへ保存。該当する `grants` がある場合は `cascade_id` に外部キーを紐付ける。
 
+### 3.5 予算データフェッチャー (`budget_fetch`)
+- 実行頻度: 週次 (毎週月曜 03:30 JST)
+- **対象データソース**:
+  - 財務省 一般会計予算 (PDF/Excel)
+  - 厚生労働省 社会保障関係予算
+  - こども家庭庁 予算概要 (PDF)
+  - IMF DOTS / World Bank API
+  - 日本銀行 資金循環統計
+- **処理フロー**:
+  1. 各公式サイトから最新の予算PDF/Excel/APIデータを取得。
+  2. PDFMiner/openpyxl でテキスト抽出し、LLM (Claude) で省庁別・事業別の予算額を構造化抽出。
+  3. 抽出結果を `nodes` (エンティティ) と `edges` (資金フロー) としてDBにUpsert。
+  4. 助成金データ (`grants`) との紐付けが可能な場合、`edges.grant_id` に外部キーを設定。
+- **信頼度 (`confidence`)**: 公式PDF直接引用の場合は `1.0`、LLM推計配分の場合は `0.7` を設定。
+
 ---
 
 ## 4. 収集スケジュール
@@ -99,6 +198,7 @@ CREATE INDEX idx_knowledge_chunks_embedding_hnsw
 | 富山市RSS | 日次 深夜02:00 | `0 2 * * *` | `collectors/rss_toyama_city.py` |
 | 富山県ページ差分 | 日次 深夜02:30 | `30 2 * * *` | `collectors/diff_toyama_pref.py` |
 | jGrants同期 | 日次 深夜03:00 | `0 3 * * *` | `collectors/jgrants_sync.py` |
+| **予算データ収集** | **週次 月曜03:30** | `30 3 * * 1` | `collectors/budget_fetch.py` |
 | 交付金カスケード | 週次 月曜04:00 | `0 4 * * 1` | `collectors/cascade_watch.py` |
 | 締切リマインド | 日次 朝08:30 | `30 8 * * *` | `notify/deadline_reminder.py` |
 | ミラサポ突合 | 月次 1日09:00 | `0 9 1 * *` | `collectors/mirasapo_crosscheck.py` |
