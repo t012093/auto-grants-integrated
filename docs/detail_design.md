@@ -68,16 +68,16 @@ async def upsert_subsidies(self, raw_subsidies: list[dict]) -> tuple[int, int]:
         item['data_hash'] = data_hash
         
         if existing:
-            # 既存レコードをアップデート
+            # 既存レコードをアップデート (ドライバ依存エラー防止のため明示的に::jsonbキャスト)
             await self.db.execute(
-                "UPDATE grants SET name = :name, payload_json = :payload, updated_at = NOW() WHERE id = :id",
+                "UPDATE grants SET name = :name, payload_json = :payload::jsonb, updated_at = NOW() WHERE id = :id",
                 {"name": item['title'], "payload": json.dumps(item), "id": existing['id']}
             )
             updated_count += 1
         else:
-            # 新規レコードをインサート
+            # 新規レコードをインサート (ドライバ依存エラー防止のため明示的に::jsonbキャスト)
             await self.db.execute(
-                "INSERT INTO grants (name, source, payload_json, created_at, updated_at) VALUES (:name, 'toyama_pref', :payload, NOW(), NOW())",
+                "INSERT INTO grants (name, source, payload_json, created_at, updated_at) VALUES (:name, 'toyama_pref', :payload::jsonb, NOW(), NOW())",
                 {"name": item['title'], "payload": json.dumps(item)}
             )
             new_count += 1
@@ -115,7 +115,9 @@ class CascadeWatchCollector:
                 return "\n".join(text_lines)
             except Exception as e:
                 # パース失敗時やメモリ不足発生時の安全なフォールバック
-                print(f"Error parsing Excel file {url}: {e}")
+                # (監視と追跡のため、単なるprintではなくログ出力とアラート登録を行う)
+                logger.error(f"Error parsing Excel file {url}: {e}")
+                await self.register_alert(f"Excel parse failed for {url}", error=str(e))
                 # (必要に応じて pandas + python-calamine 等の軽量ライブラリへの移行を推奨)
                 return ""
         return ""

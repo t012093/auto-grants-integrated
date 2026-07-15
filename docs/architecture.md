@@ -123,7 +123,7 @@ EMBEDDING_PROVIDER=modal
 
 [オフライン/テスト用フォールバック]
 EMBEDDING_PROVIDER=mock (または none)
-  └─► MockEmbeddingService ──► 4096次元のゼロ配列 (0.0, 0.0, ...) を返却してDBエラーを回避
+  └─► MockEmbeddingService ──► 極小のランダムノイズを含む4096次元ベクトルを返却してゼロ除算とDBエラーを回避
 ```
 
 ---
