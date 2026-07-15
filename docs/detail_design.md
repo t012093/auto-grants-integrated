@@ -278,11 +278,185 @@ class MockEmbeddingService(EmbeddingServiceBase):
 # 3. レスポンスに 'is_fallback: true' を含めてフロントエンドに返し、UI上で「AI検索起動中のため暫定結果を表示中...」のステータスとプログレスバー（3分目安）を描画する。
 ```
 
+### 3.3 Modal本番環境セマンティック検索・AIマッチング詳細設計
+
+Modal GPU上で稼働する `Qwen3-Embedding-8B` と `BgeReranker v2-m3` にアクセスし、Supabase（pgvector）と連携してセマンティック検索およびマッチングを行う本番ロジックの設計。
+
+#### クラス構成と処理フロー
+
+```python
+class ModalAIService:
+    """
+    Modal GPU インフラ上で稼働する Embedding / Reranking API との通信を担当。
+    """
+    def __init__(self, endpoint_url: str, api_key: str):
+        self.endpoint = endpoint_url
+        self.headers = {"Authorization": f"Bearer {api_key}"}
+
+    async def get_embedding(self, text: str) -> list[float]:
+        """Qwen3-Embedding-8B による4096次元のベクトル生成"""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.endpoint}/v1/embeddings",
+                json={"input": text, "model": "Qwen3-Embedding-8B"},
+                headers=self.headers,
+                timeout=10.0
+            )
+            response.raise_for_status()
+            return response.json()["data"][0]["embedding"]
+
+    async def compute_rerank_scores(self, query: str, documents: list[str]) -> list[float]:
+        """BgeReranker v2-m3 によるクロスエンコーダ類似度スコアリング"""
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.endpoint}/v1/rerank",
+                json={
+                    "query": query,
+                    "documents": documents,
+                    "model": "bge-reranker-v2-m3"
+                },
+                headers=self.headers,
+                timeout=15.0
+            )
+            response.raise_for_status()
+            return [item["relevance_score"] for item in response.json()["results"]]
+
+
+class RAGMatchingEngine:
+    """
+    助成金およびボランティアのセマンティック検索・マッチングエンジン。
+    """
+    def __init__(self, db_client: PostgreSQLClient, ai_service: ModalAIService, llm_client: ClaudeClient):
+        self.db = db_client
+        self.ai = ai_service
+        self.llm = llm_client
+
+    async def search_matched_projects(self, user_id: str, limit: int = 10) -> list[dict]:
+        # 1. ユーザープロフィールの取得とテキスト表現（活動履歴サマリー等）の構築
+        user_profile = await self.db.fetch_one(
+            "SELECT display_name, bio, interest_areas FROM public.profiles WHERE id = :id",
+            {"id": user_id}
+        )
+        profile_text = f"名前: {user_profile['display_name']}. 興味: {user_profile['interest_areas']}. 自己紹介: {user_profile['bio']}"
+
+        # 2. ユーザープロフィールベクトルの生成
+        user_vector = await self.ai.get_embedding(profile_text)
+
+        # 3. SQL事前フィルタ ＋ pgvector コサイン類似度による一次絞り込み (上位30件)
+        candidates_raw = await self.db.fetch_all("""
+            SELECT id, title, description, max_participants, participants, event_date, location, npo_name
+            FROM public.projects
+            WHERE event_date >= NOW()::date
+              AND participants < max_participants
+            ORDER BY embedding <=> :vector::vector
+            LIMIT 30
+        """, {"vector": user_vector})
+
+        if not candidates_raw:
+            return []
+
+        # データベースのRowオブジェクトを書き込み可能なdictに変換
+        candidates = [dict(c) for c in candidates_raw]
+
+        # 4. Modal BgeReranker によるクロスエンコーダ・リランキング
+        docs = [f"タイトル: {c['title']}. 詳細: {c['description']}. 地域: {c['location']}" for c in candidates]
+        rerank_scores = await self.ai.compute_rerank_scores(profile_text, docs)
+
+        # スコアを紐付けてソート
+        for idx, score in enumerate(rerank_scores):
+            candidates[idx]["match_score"] = score
+        candidates.sort(key=lambda x: x["match_score"], reverse=True)
+        results = candidates[:limit]
+
+        # 5. 上位候補に対して LLM で推薦理由を非同期並行に生成 (Explainable Matching)
+        import asyncio
+        tasks = [self.generate_explainability_text(profile_text, item) for item in results]
+        reasons = await asyncio.gather(*tasks)
+        
+        for idx, reason in enumerate(reasons):
+            results[idx]["match_reason"] = reason
+
+        return results
+
+    async def generate_explainability_text(self, profile_summary: str, project: dict) -> str:
+        prompt = f"""
+        あなたは親しみやすいマッチングアドバイザーです。
+        以下のユーザープロフィールと、ボランティアプロジェクトの情報に基づき、なぜこのプロジェクトがユーザーにおすすめなのか、その理由をユーザーへのメッセージとして2〜3行で簡潔に生成してください。
+        
+        ユーザープロフィール:
+        {profile_summary}
+        
+        プロジェクト情報:
+        タイトル: {project['title']}
+        概要: {project['description']}
+        
+        回答ルール:
+        - ユーザーの過去の関心や自己紹介の内容と、プロジェクトの特徴的な要求事項のつながりを具体的に指摘すること。
+        - 2〜3行（最大150文字程度）で簡潔に出力すること。
+        - ハルシネーション（推測による経歴の捏造など）を避けること。
+        """
+        return await self.llm.generate_text(prompt)
+```
+
 ---
 
 ## 4. データベース移行設計 (SQLite -> PostgreSQL)
 
+### 4.1 移行手順
 (前バージョンと同様のため省略。)
+
+### 4.2 コアテーブル Row Level Security (RLS) 設計
+Supabase / PostgreSQL を用いた、各データエンティティに対するロールベースアクセス制御。
+
+```sql
+-- RLSの有効化
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.npo_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.grants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
+
+-- 1. profiles テーブルポリシー
+-- 誰でも他ユーザーの公開プロフィールを閲覧可能
+CREATE POLICY profiles_select_policy ON public.profiles
+  FOR SELECT USING (true);
+
+-- 自身のプロフィールのみ更新・削除が可能
+CREATE POLICY profiles_write_policy ON public.profiles
+  FOR UPDATE USING (auth.uid() = id);
+
+-- 2. npo_profiles テーブルポリシー
+-- 誰でもNPOプロフィールを閲覧可能
+CREATE POLICY npo_profiles_select_policy ON public.npo_profiles
+  FOR SELECT USING (true);
+
+-- NPO所有者のみ更新・削除が可能
+CREATE POLICY npo_profiles_write_policy ON public.npo_profiles
+  FOR UPDATE USING (auth.uid() = owner_id);
+
+-- 3. grants (助成金情報) テーブルポリシー
+-- 誰でも助成金情報を閲覧可能
+CREATE POLICY grants_select_policy ON public.grants
+  FOR SELECT USING (true);
+
+-- 一般ユーザーによる挿入・更新・削除はデフォルトで禁止
+-- ※Supabaseのservice_role(管理者/クローラー)は自動的にRLSをバイパスするため、明示的な書き込みポリシーは不要
+
+-- 4. projects (実行プロジェクト) テーブルポリシー
+-- 誰でもプロジェクト情報を閲覧可能
+CREATE POLICY projects_select_policy ON public.projects
+  FOR SELECT USING (true);
+
+-- 認証済みユーザーのみ新規プロジェクトの作成が可能 (かつ作成者が自分自身であること)
+CREATE POLICY projects_insert_policy ON public.projects
+  FOR INSERT WITH CHECK (
+    auth.role() = 'authenticated' AND 
+    auth.uid() = created_by
+  );
+
+-- プロジェクト作成者のみ更新・削除が可能
+CREATE POLICY projects_write_policy ON public.projects
+  FOR ALL USING (auth.uid() = created_by);
+```
 
 ---
 
@@ -614,3 +788,428 @@ RAG適合判定時に、LLM (Gemini/Claude) を用いて助成金に対する団
 | `GET` | `/api/v1/dashboard/summary` | ダッシュボードサマリー (Active grants数・総申請額等) | Dashboard | JWT (Bearer Token) | 120 req/min |
 | `GET` | `/api/v1/dashboard/timeline` | 予算カレンダータイムラインデータ | Dashboard | JWT (Bearer Token) | 120 req/min |
 | `GET` | `/api/v1/dashboard/agent-status` | Modal AI エージェントの稼働ステータス | Dashboard | JWT (Bearer Token) | 30 req/min |
+
+---
+
+## 8. 申請書・提案書作成詳細設計 (`proposal_generator.py`)
+
+Excel/Word原本テンプレートへの自動マッピング、および自治体総合計画等を行政文書GraphRAGで解析・エビデンス参照し、政策適合度の高い提案書（GovPro）を自動生成するクラス・フロー設計。
+
+#### クラス構成と処理フロー
+
+```python
+class DocumentTemplateMapper:
+    """
+    原本テンプレート（Excel/Word）に対して、抽出された構造化データを指定箇所にマッピングする。
+    """
+    def __init__(self, template_path: str):
+        self.template_path = template_path
+
+    def fill_excel_fields(self, data_mappings: dict[str, any], output_path: str):
+        """
+        Prisma等から取得した申請データをExcelのセル番地へマッピング
+        data_mappings: {'B4': '団体名', 'C5': '事業名', ...}
+        """
+        import openpyxl
+        wb = openpyxl.load_workbook(self.template_path)
+        sheet = wb.active
+        for cell_ref, value in data_mappings.items():
+            sheet[cell_ref] = value
+        wb.save(output_path)
+
+    def fill_word_placeholders(self, data_mappings: dict[str, str], output_path: str):
+        """
+        Word文書内のプレースホルダ（例: {{npo_name}}）を実際のデータ値へ置換
+        """
+        from docx import Document
+        doc = Document(self.template_path)
+        for p in doc.paragraphs:
+            for key, val in data_mappings.items():
+                if key in p.text:
+                    p.text = p.text.replace(key, val)
+        doc.save(output_path)
+
+
+class ProposalGenerator:
+    """
+    団体プロファイルと行政文書GraphRAGの解析結果からエビデンス（引用）付き提案書を生成する。
+    """
+    def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient, graph_rag: GraphRAGClient):
+        self.db = db_client
+        self.llm = llm_client
+        self.graph_rag = graph_rag
+
+    async def generate_proposal_draft(self, npo_id: str, target_policy_query: str, proposal_outline: str) -> dict:
+        # 1. 団体情報（実績・プロフィール）の取得
+        npo_profile = await self.db.fetch_one("SELECT name, bio, history FROM npo_profiles WHERE id = :id", {"id": npo_id})
+
+        # 2. 自治体総合計画等を格納したGraphRAGからエビデンス付きコンテキストを検索
+        rag_context = await self.graph_rag.query_community_context(
+            query=target_policy_query,
+            community_level=2
+        )
+
+        # 3. LLMを用いたエビデンス参照型プロポーザル生成
+        prompt = f"""
+        あなたは行政へのプロポーザル提案を支援するコンサルタントです。
+        以下の団体の活動実績と、自治体の行政文書（総合計画等）のコンテキストを基に、提案書（GovPro）を生成してください。
+        
+        【自団体プロフィール】
+        {npo_profile['bio']}
+        実績: {npo_profile['history']}
+        
+        【行政文書コンテキスト (GraphRAG検索結果)】
+        {rag_context['context_text']}
+        
+        【提案のコア方針】
+        {proposal_outline}
+        
+        【成果要件】
+        - 提案の各セクションで「なぜこの施策が必要か」の行政側根拠（総合計画の個別方針等）を直接参照すること。
+        - 以下のJSONフォーマットで厳格に出力すること。
+        
+        出力JSON形式:
+        {{
+          "proposal_title": "提案のタイトル",
+          "proposal_body_markdown": "Markdown形式の提案本文",
+          "evidences": [
+            {{
+              "assertion": "提案本文中の特定の主張・根拠",
+              "source_document": "根拠となった行政文書名 (例: 富山市総合計画2026)",
+              "page_number": 引用ページ番号または章番号,
+              "snippet": "引用された具体的な文章"
+            }}
+          ]
+        }}
+        """
+        response_json = await self.llm.generate_json(prompt)
+        return response_json
+```
+
+---
+
+## 9. 市民合意・協議詳細設計 (`deliberation_engine.py`)
+
+二次投票（Quadratic Voting）の計算およびPol.isライクな意見クラスタリングによる合意形成分析を行う。
+
+#### クラス構成と処理フロー
+
+```python
+class DeliberationEngine:
+    """
+    市民合意形成分析およびデジタル投票集計エンジン。
+    """
+    def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient):
+        self.db = db_client
+        self.llm = llm_client
+
+    async def calculate_quadratic_voting(self, topic_id: str) -> dict:
+        """
+        投票ウェイトの平方根の和による二次投票結果の集計。
+        投票数 = √投票ポイント
+        """
+        votes = await self.db.fetch_all(
+            "SELECT user_id, vote_weight FROM public.deliberation_votes WHERE topic_id = :topic_id",
+            {"topic_id": topic_id}
+        )
+        
+        total_consensus_score = 0.0
+        total_voters = len(votes)
+        
+        for vote in votes:
+            weight = vote["vote_weight"]
+            if weight == 0:
+                continue
+            # 二次投票計算 (平方根による重み調整)
+            direction = 1 if weight > 0 else -1
+            voter_impact = direction * (abs(weight) ** 0.5)
+            total_consensus_score += voter_impact
+            
+        return {
+            "topic_id": topic_id,
+            "total_voters": total_voters,
+            "consensus_score": total_consensus_score
+        }
+
+    async def run_opinion_clustering(self, topic_id: str) -> dict:
+        """
+        コメントをLLMにより分類（クラスタリング）し、対立軸や賛同傾向を分析する。
+        """
+        comments = await self.db.fetch_all(
+            "SELECT id, message FROM public.deliberation_comments WHERE topic_id = :topic_id",
+            {"topic_id": topic_id}
+        )
+        
+        clustering_results = []
+        for comm in comments:
+            prompt = f"""
+            以下の協議コメントをトピックへのスタンスに基づいて3つのクラスタ（1: 推進・肯定的, 2: 懸念・否定的, 3: 第三の提案・中立）に分類し、クラスタID（1, 2, 3のいずれかの数値）のみを返してください。
+            
+            コメント:
+            "{comm['message']}"
+            """
+            cluster_id_str = await self.llm.generate_text(prompt)
+            cluster_id = int(cluster_id_str.strip())
+            
+            # DBにクラスタ分類を反映
+            await self.db.execute(
+                "UPDATE public.deliberation_comments SET opinion_cluster = :cluster WHERE id = :id",
+                {"cluster": cluster_id, "id": comm["id"]}
+            )
+            clustering_results.append({"comment_id": comm["id"], "cluster": cluster_id})
+
+        return {"topic_id": topic_id, "processed_comments": len(clustering_results)}
+
+    async def update_consensus_summary(self, topic_id: str):
+        """合意度（agreement_rate）の算出とAI要約の保存"""
+        votes_summary = await self.db.fetch_all("""
+            SELECT opinion_cluster, COUNT(*) as count 
+            FROM public.deliberation_comments 
+            WHERE topic_id = :topic_id AND opinion_cluster IS NOT NULL
+            GROUP BY opinion_cluster
+        """, {"topic_id": topic_id})
+        
+        # 簡易合意率 = 肯定(1) / 全コメント
+        total = sum([item["count"] for item in votes_summary])
+        positive = sum([item["count"] for item in votes_summary if item["opinion_cluster"] == 1])
+        agreement_rate = (positive / total) if total > 0 else 0.0
+
+        # LLMによる主要な合意ポイントの要約生成
+        comments = await self.db.fetch_all(
+            "SELECT message FROM public.deliberation_comments WHERE topic_id = :topic_id LIMIT 50",
+            {"topic_id": topic_id}
+        )
+        comment_text = "\n".join([f"- {c['message']}" for c in comments])
+        prompt = f"以下の協議コメントを分析し、共通の合意点および主要な懸念点を3項目に要約してください。\n\nコメント一覧:\n{comment_text}"
+        summary = await self.llm.generate_text(prompt)
+
+        # 統計テーブルへUpsert
+        await self.db.execute("""
+            INSERT INTO public.deliberation_stats (topic_id, total_voters, agreement_rate, consensus_summary, updated_at)
+            VALUES (:topic_id, :total, :rate, :summary, NOW())
+            ON CONFLICT (topic_id) DO UPDATE 
+            SET total_voters = EXCLUDED.total_voters,
+                agreement_rate = EXCLUDED.agreement_rate,
+                consensus_summary = EXCLUDED.consensus_summary,
+                updated_at = NOW()
+        """, {"topic_id": topic_id, "total": total, "rate": agreement_rate, "summary": summary})
+```
+
+---
+
+## 10. クラウドファンディング詳細設計 (`crowdfunding_service.py`)
+
+トランザクションを保護したアトミックな寄付実行、およびStripe決済Webhook連携の処理。
+
+#### クラス構成と処理フロー
+
+```python
+class StripeWebhookHandler:
+    """Stripe決済完了イベントを受信し、安全に寄付金加算処理を起動する"""
+    def __init__(self, db_client: PostgreSQLClient, stripe_webhook_secret: str):
+        self.db = db_client
+        self.secret = stripe_webhook_secret
+
+    async def handle_checkout_session_completed(self, stripe_payload: dict, stripe_signature: str) -> dict:
+        import stripe
+        # 1. 署名検証
+        try:
+            event = stripe.Webhook.construct_event(stripe_payload, stripe_signature, self.secret)
+        except Exception as e:
+            return {"status": "error", "message": f"Webhook verification failed: {e}"}
+
+        # 2. 決済成功時の処理
+        if event["type"] == "checkout.session.completed":
+            session = event["data"]["object"]
+            metadata = session.get("metadata", {})
+            stripe_session_id = session.get("id")
+
+            # 3. 冪等性チェック: 既に同じ Stripe 決済セッションIDが処理済みか確認
+            # (public.crowdfunding_donations に stripe_session_id TEXT UNIQUE 制約がある前提)
+            existing = await self.db.fetch_one(
+                "SELECT id FROM public.crowdfunding_donations WHERE stripe_session_id = :sid",
+                {"sid": stripe_session_id}
+            )
+            if existing:
+                return {"status": "already_processed", "donation_id": existing["id"]}
+            
+            # トラッキングに必要なパラメータ抽出
+            campaign_id = metadata.get("campaign_id")
+            donor_name = metadata.get("donor_name", "匿名希望")
+            donor_id = metadata.get("donor_id") # Nullable (未ログイン寄付対応)
+            amount = int(session.get("amount_total", 0)) / 100 # JPY想定 (Stripeはセント/最小通貨単位のため)
+            message = metadata.get("message")
+
+            # 4. DB側の寄付処理RPC (donate_to_campaign) の実行
+            result = await self.db.execute_function(
+                "public.donate_to_campaign",
+                {
+                    "p_campaign_id": campaign_id,
+                    "p_donor_name": donor_name,
+                    "p_amount": amount,
+                    "p_message": message,
+                    "p_donor_id": donor_id,
+                    "p_stripe_session_id": stripe_session_id
+                }
+            )
+            return {"status": "success", "donation_id": result["donation_id"]}
+
+        return {"status": "ignored"}
+```
+
+---
+
+## 11. ボランティア案件・実行詳細設計 (`volunteer_workflow.py`)
+
+ボランティアの応募、承認状態のステートマシン制御、および完了時のVerifiable Credentials（デジタル実績証明）発行・検証のフロー。
+
+#### クラス構成と処理フロー
+
+```python
+class VolunteerWorkflowManager:
+    """ボランティアプロセスの状態制御およびオープンバッジ（実績証明）の発行"""
+    def __init__(self, db_client: PostgreSQLClient, zkp_issuer: ZKPBadgeIssuer):
+        self.db = db_client
+        self.zkp = zkp_issuer
+
+    async def process_application_approval(self, application_id: str, is_approved: bool) -> dict:
+        """
+        ステータス変更: PENDING -> APPROVED / REJECTED
+        APPROVED の場合、projects.participants の安全なインクリメントと定員満了チェックを行う。
+        """
+        new_status = "APPROVED" if is_approved else "REJECTED"
+        
+        async with self.db.transaction() as tx:
+            # 1. 現在のステータスと定員上限の確認
+            app = await tx.fetch_one("""
+                SELECT a.project_id, a.user_id, a.status, p.participants, p.max_participants 
+                FROM public.project_applications a
+                JOIN public.projects p ON a.project_id = p.id
+                WHERE a.id = :id FOR UPDATE
+            """, {"id": application_id})
+
+            if not app:
+                raise ValueError("Application not found")
+            if app["status"] != "PENDING":
+                return {"status": "error", "message": "Already processed"}
+
+            # 2. 定員チェック (APPROVED の場合のみ)
+            if is_approved and app["participants"] >= app["max_participants"]:
+                return {"status": "error", "message": "Project limit reached"}
+
+            # 3. 応募ステータスの更新
+            await tx.execute(
+                "UPDATE public.project_applications SET status = :status WHERE id = :id",
+                {"status": new_status, "id": application_id}
+            )
+
+            # 4. APPROVEDのときのみ参加数加算、最大定員到達時にプロジェクトをACTIVEへ移行
+            project_status = "OPEN"
+            if is_approved:
+                new_count = app["participants"] + 1
+                project_status = "ACTIVE" if new_count >= app["max_participants"] else "OPEN"
+                await tx.execute("""
+                    UPDATE public.projects 
+                    SET participants = :participants, status = :status
+                    WHERE id = :pid
+                """, {"participants": new_count, "status": project_status, "pid": app["project_id"]})
+
+        return {"status": "success", "new_application_status": new_status, "project_status": project_status}
+
+    async def complete_project_and_issue_credential(self, project_id: str, participant_id: str) -> dict:
+        """
+        ボランティア完了ユーザーに対してW3C/ZKP準拠のVerifiable Credential（オープンバッジ）を発行・DB保存。
+        """
+        # 1. ユーザーのDIDと活動履歴の取得
+        user = await self.db.fetch_one("SELECT did, display_name FROM public.profiles WHERE id = :id", {"id": participant_id})
+        project = await self.db.fetch_one("SELECT title, duration_hours FROM public.projects WHERE id = :id", {"id": project_id})
+        
+        # 2. ホルダーDIDへの暗号証明書発行 (WASM/snarkjs 等による証明生成ロジックの呼び出し)
+        credential_data = await self.zkp.generate_groth16_proof(
+            holder_did=user["did"],
+            hours=project["duration_hours"],
+            badge_name=project["title"]
+        )
+
+        # 3. zk_verifiable_credentials テーブルへの挿入
+        await self.db.execute("""
+            INSERT INTO public.zk_verifiable_credentials (
+                issuer_did, holder_id, holder_did, credential_type, commitment_hash, zk_proof, is_valid
+            ) VALUES (
+                :issuer, :holder, :holder_did, 'VOLUNTEER_HOURS', :hash, :proof::jsonb, true
+            )
+        """, {
+            "issuer": self.zkp.get_issuer_did(),
+            "holder": participant_id,
+            "holder_did": user["did"],
+            "hash": credential_data["commitment_hash"],
+            "proof": json.dumps(credential_data["zk_proof"])
+        })
+        
+        return {"status": "issued", "commitment_hash": credential_data["commitment_hash"]}
+```
+
+---
+
+## 12. 社会的インパクト・フィードバック詳細設計 (`impact_visualizer.py`)
+
+社会的インパクト実績（アウトカム）データを予算フロー終端（サンキーダイアグラム）に動的マージして表示するAPIデータ変換アルゴリズム。
+
+#### クラス構成と処理フロー
+
+```python
+class IntegratedImpactVisualizer:
+    """
+    予算/交付金フローデータと社会的成果(インパクト)データのマージ処理。
+    """
+    def __init__(self, db_client: PostgreSQLClient):
+        self.db = db_client
+
+    async def get_integrated_sankey(self, fiscal_year: int, min_val: float = 0.0) -> dict:
+        """
+        一般会計・省庁・助成金フローに社会的インパクトデータを動的マージした
+        @nivo/sankey 互換のデータ構造を構築する。
+        """
+        # 1. ベースとなる予算ノード・エッジの取得 (一般会計 -> 助成金 -> プロジェクトまで)
+        # ※セクション6.3 の変換ロジックを流用
+        sankey_data = await self._fetch_base_sankey_flows(fiscal_year, min_val)
+
+        # 2. プロジェクトに紐づく社会的インパクト指標 (アウトカム) をDBから全取得
+        impact_records = await self.db.fetch_all("""
+            SELECT id, project_id, metric_name, metric_value, metric_unit, impact_summary
+            FROM public.project_impacts
+        """)
+
+        # 3. インパクト実績ノードの動的生成とリンクのマージ
+        # プロジェクトごとの総流入額（エッジ値の総和）を算出し、その一定割合をインパクト可視化の太さとして分配
+        project_incoming_funds = {}
+        for link in sankey_data["links"]:
+            tgt = link["target"]
+            project_incoming_funds[tgt] = project_incoming_funds.get(tgt, 0.0) + link["value"]
+
+        for record in impact_records:
+            pid = str(record["project_id"])
+            impact_node_id = f"IMP_{record['id']}"
+            label_text = f"【成果】{record['metric_name']}: {record['metric_value']}{record['metric_unit']}"
+
+            # ノード一覧への追加
+            sankey_data["nodes"].append({
+                "id": impact_node_id,
+                "label": label_text,
+                "color": "#06b6d4" # --color-civic (Aqua Blue: コズミック・グラスデザインシステム準拠)
+            })
+
+            # プロジェクトの総予算（流入額）を基準に、アウトカムの描画太さをスケーリング
+            # (流入予算の20%をアウトカムへのフローとして割り当て、予算規模に比例した太さを確保。予算未紐付けの場合は最小値 1.0)
+            project_budget = project_incoming_funds.get(pid, 0.0)
+            allocated_value = (project_budget * 0.20) if project_budget > 0 else 1.0
+
+            # プロジェクト(Level 4)からインパクト(アウトカム)ノードへのリンク接続を追加
+            sankey_data["links"].append({
+                "source": pid,
+                "target": impact_node_id,
+                "value": allocated_value
+            })
+
+        return sankey_data
+```
