@@ -119,8 +119,9 @@ graph TD
 | **Collectors** | データ収集・同期 | 日次/週次バッチスクリプトに加え、ボランティア応募やクラファン決済時のSupabase Realtimeリスナーによる即時反映。 |
 | **Processing** | データ構造化・エージェント | `BeautifulSoup` + `LLM` によるテキスト抽出。自治体基本計画のGraphRAGコミュニティ生成。プロソーシャル（市民合意）指標の算出。 |
 | **AI/Embedding** | セマンティック処理 | Modal GPU上のQwen3 (4096次元) で統一。BgeRerankerによる高精度リランキング。 |
-| **Data** | 永続化とリアルタイム連携 | PostgreSQL (Supabase) 上に、助成金、予算フロー、クラファン、プロジェクト（ボランティア）、市民投票、団体アセットの全テーブルを一元化。Row Level Security (RLS) によるセキュリティ確保。 |
-| **Application** | ロジック・インターフェース | FastAPIによる各種AIエージェントのオーケストレーション、および外部AI（Claude Desktopなど）接続用のMCPサーバー。 |
+| **Security & Privacy** | 信頼・プライバシー保護 | W3C規格の **DID（分散型ID）** を用いた自己主権型認証、および **zk-SNARKs** を用いた個人情報不要の実績・住民属性証明。 |
+| **Data** | 永続化とリアルタイム連携 | PostgreSQL (Supabase) 上に、助成金、予算フロー、クラファン、プロジェクト（ボランティア）、市民投票、団体アセット、およびZKP検証用資格（VC）テーブルを一元化。 |
+| **Application** | ロジック・インターフェース | FastAPIによるAIエージェントのオーケストレーション、ZKP検証エンジン、外部接続用MCPサーバー。 |
 | **Frontend** | ユーザーインターフェース | React 19 + Vite。「Cosmic Glass」デザインシステムを採用した、左固定多階層ナビゲーションによるSPA。 |
 | **Interface** | マルチチャネルアクセス | Web UI、Slack/LINE/Emailによる期日・応募通知、Claudeによる自然言語MCP操作。 |
 
@@ -149,6 +150,29 @@ sequenceDiagram
     Writer->>GraphRAG: 政策適合性のエビデンスを取得
     Writer->>Writer: 提案書の下書きとエビデンスを自動生成
     Writer-->>Proposal: 根拠（出典）付き提案書をエクスポート
+
+### 3.2 ゼロ知識証明 (ZKP) を用いたプライバシー保護型属性証明フロー
+市民が機微な個人データ（本名、住所、過去の個別の被支援者情報）を開示せずに、「住民資格」や「活動実績」のみを安全に検証者に証明する流れ。
+
+```mermaid
+sequenceDiagram
+    participant Wallet as シビック・ウォレット (WASM)
+    participant Issuer as 発行者 (NPO/自治体)
+    participant DB as Supabase (ZKP / VCストア)
+    participant Verifier as 検証者 (自治体/AI審査官)
+
+    %% 資格発行フェーズ
+    Issuer->>Wallet: ボランティア実績 / 住民権の暗号署名データ(VC)を発行
+    Wallet->>Wallet: ウォレット（ブラウザ）へ実績の生データを安全に格納
+
+    %% 証明・検証フェーズ
+    Wallet->>Wallet: 生データから「合計活動時間 >= 50」のゼロ知識証明(zk_proof)を生成 (zk-SNARKs)
+    Wallet->>DB: zk_proof とコミットメントハッシュを登録
+    Verifier->>DB: ユーザーの zk_proof とコミットメントをロード
+    Verifier->>Verifier: 公開パラメータを用いて ZKP の正当性を検証 (生データは見えない)
+    Verifier-->>Verifier: 検証成功 (属性が真であることを承認)
+```
+
 ```
 
 ---

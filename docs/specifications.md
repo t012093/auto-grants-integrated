@@ -50,6 +50,7 @@ CREATE TABLE public.profiles (
   interest_areas TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
   preferred_theme TEXT NOT NULL DEFAULT 'cosmic', -- 'cosmic' (Dark) or 'nordic' (Light)
   embedding vector(4096), -- ユーザープロファイル・スキルベクトル (Modal用)
+  did TEXT UNIQUE, -- W3C標準の自己主権型分散ID (DID)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );
@@ -467,18 +468,23 @@ $$ LANGUAGE plpgsql;
     2. LLMに「財務審査員」「法務審査員」「地域住民代表」の各プロンプトを与えて並列レビューを実行。
     3. 合計スコアおよび「どの項目を改善すれば加点されるか」の推敲アドバイスを返却。
 
-### 5.2 デジタル実績証明 (Verifiable Credentials / オープンバッジ)
-* **概要**: ボランティアが活動を完了した際、改ざん防止の施された実績証明書を発行します。
+### 5.2 自己主権型デジタル実績証明 (DID & ZKP / Verifiable Credentials)
+* **概要**: W3C標準の検証可能資格（VC）および zk-SNARKs を用いて、ユーザーが個人情報を開示せずに、住民権や活動実績を証明する仕様。
 
 ```sql
--- デジタル実績バッジテーブル
-CREATE TABLE public.digital_badges (
+-- ZKP対応 検証可能資格 (Verifiable Credentials) ストア
+CREATE TABLE public.zk_verifiable_credentials (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES public.profiles (id) ON DELETE CASCADE,
-  project_id UUID NOT NULL REFERENCES public.projects (id) ON DELETE CASCADE,
-  badge_type TEXT NOT NULL,                     -- 'VOLUNTEER', 'PROBONO', 'LEADER'
-  verification_hash TEXT NOT NULL UNIQUE,       -- 実績改ざん防止検証用のSHA256ハッシュ
-  metadata JSONB NOT NULL,                      -- { "hours": 12, "skills": ["React", "UI Design"], "completed_at": "2026-07-15" }
+  issuer_did TEXT NOT NULL,                     -- 発行者(認定NPOや自治体)のDID
+  holder_did TEXT NOT NULL REFERENCES public.profiles (did) ON DELETE CASCADE,
+  credential_type TEXT NOT NULL,                -- 'VOLUNTEER_HOURS', 'RESIDENT_PROOF'
+  
+  -- 生の実績・属性データを暗号学的にコミットして隠蔽したハッシュ
+  commitment_hash TEXT NOT NULL UNIQUE,
+  
+  -- クライアント側 (WASM) で生成された zk-SNARKs (Groth16等) の証明データ
+  zk_proof JSONB NOT NULL,
+  
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
