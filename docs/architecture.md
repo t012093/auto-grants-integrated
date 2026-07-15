@@ -171,7 +171,7 @@ graph LR
     subgraph Section2["🤖 自治体提案"]
         NAV --> SB_DOCS["📂 行政資料ライブラリ"]
         NAV --> SB_PROP["🤖 提案書ジェネレーター"]
-        NAV --> SB_GRAG["🌐 GraphRAG マップ"]
+        NAV --> SB_FLOW_MAP["🌐 政策接続フロー"]
     end
 
     subgraph Section3["👥 市民参加と実行"]

@@ -424,3 +424,26 @@ $$ LANGUAGE plpgsql;
     }
   ]
   ```
+
+#### `GET /api/flows/connections` (2D 政策・助成金接続フローデータ)
+* **概要**: 自治体総合計画から実行プロジェクトまでの縦方向の接続パス、および将来フェーズ用の横方向（同階層）の関連度データを取得します。
+* **認証**: 必要 (Bearer Token)
+* **レスポンス**:
+  ```json
+  {
+    "nodes": [
+      { "id": "vision-1", "level": 1, "label": "コンパクトシティの推進", "type": "vision" },
+      { "id": "policy-1-2", "level": 2, "label": "公共交通の活性化", "type": "policy" },
+      { "id": "subsidy-101", "level": 3, "label": "地域交通活性化補助金", "type": "subsidy" },
+      { "id": "project-201", "level": 4, "label": "車いすスマートモビリティ運行", "type": "project" }
+    ],
+    "links": [
+      { "source": "vision-1", "target": "policy-1-2", "direction": "vertical", "weight": 1.0 },
+      { "source": "policy-1-2", "target": "subsidy-101", "direction": "vertical", "weight": 1.0 },
+      { "source": "subsidy-101", "target": "project-201", "direction": "vertical", "weight": 0.85 },
+      
+      /* 将来フェーズ(Phase 2)用: 同階層の横方向関連度 (コサイン類似度等) */
+      { "source": "subsidy-101", "target": "subsidy-102", "direction": "horizontal", "weight": 0.68 }
+    ]
+  }
+  ```
