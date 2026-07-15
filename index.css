@@ -1,3 +1,6 @@
+/* NOTE: This index.css is temporarily placed at the root level.
+   It will be relocated to frontend/src/index.css or src/index.css in future frontend setup. */
+
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap');
 
 /* ==========================================================================
@@ -44,6 +47,11 @@
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-xl: 24px;
+
+  /* Backdrop Blurs */
+  --blur-glass: blur(16px);
+  --blur-glass-md: blur(12px);
+  --blur-glass-sm: blur(8px);
 }
 
 /* ==========================================================================
@@ -77,8 +85,8 @@ h1, h2, h3, h4, h5, h6 {
    ========================================================================== */
 .glass-panel {
   background: var(--surface-glass);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
   border: 1px solid var(--border-glass);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-glass);
@@ -87,8 +95,8 @@ h1, h2, h3, h4, h5, h6 {
 
 .glass-card {
   background: var(--surface-glass);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: var(--blur-glass-md);
+  -webkit-backdrop-filter: var(--blur-glass-md);
   border: 1px solid var(--border-glass);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-glass);
@@ -147,7 +155,8 @@ h1, h2, h3, h4, h5, h6 {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid var(--border-glass);
   color: var(--text-primary);
-  backdrop-filter: blur(8px);
+  backdrop-filter: var(--blur-glass-sm);
+  -webkit-backdrop-filter: var(--blur-glass-sm);
 }
 
 .btn-secondary:hover {

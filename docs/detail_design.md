@@ -238,6 +238,7 @@ class BudgetFetcher:
     "target_entity": "送金先のエンティティ名 (例: こども家庭庁)",
     "amount_jpy": 金額(円),
     "fiscal_year": 会計年度,
+    "category": "分類 (例: welfare, trade, subsidy_grant)",
     "sub_category": "詳細分類 (例: 子育て支援)",
     "page_number": 参照ページ番号,
     "confidence": 1.0
@@ -249,6 +250,7 @@ class BudgetFetcher:
 - 公式PDFから直接読み取れる値は confidence: 1.0
 - LLMが推計した配分値は confidence: 0.7
 - 参照ページ番号が特定できない場合は null
+- カテゴリ(category)は、該当する分類（welfare / trade / subsidy_grant / subsidy_award 等）を推論して記述
 
 テキスト:
 {text[:50000]}
@@ -259,6 +261,40 @@ class BudgetFetcher:
 ### 5.3 nodes/edges Upsert ロジック
 
 ```python
+    def _generate_node_id(self, entity_name: str) -> str:
+        """エンティティ名から一意かつ決定論的なIDを生成する (ハッシュ化)。"""
+        # 国などの主要な既知ノードは定義済みの定数IDを返し、それ以外はハッシュ値をベースにする
+        known_ids = {
+            "一般会計": "GEN_ACC",
+            "特別会計": "SPL_ACC",
+            "財務省": "MIN_MOF",
+            "厚生労働省": "MIN_MHLW",
+            "こども家庭庁": "MIN_CFA",
+            "日本国": "JPN"
+        }
+        if entity_name in known_ids:
+            return known_ids[entity_name]
+        
+        # 決定論的なハッシュ生成 (SHA-256)
+        import hashlib
+        hasher = hashlib.sha256(entity_name.encode("utf-8"))
+        # プレフィックスを付けて32文字に制限
+        return f"NODE_{hasher.hexdigest()[:16].upper()}"
+
+    def _infer_node_type(self, entity_name: str) -> str:
+        """エンティティ名からノード種別を推論する。"""
+        name = entity_name.lower()
+        if "日本" in name or "国庫" in name:
+            return "country"
+        elif "省" in name or "庁" in name:
+            return "ministry"
+        elif "県" in name or "市" in name or "都" in name or "道" in name:
+            return "prefecture"
+        elif "助成" in name or "補助" in name or "事業" in name:
+            return "subsidy"
+        else:
+            return "recipient_org"
+
     async def _upsert_graph(self, budget_items: list[dict], source: DataSource) -> tuple[int, int]:
         node_count = 0
         edge_count = 0
@@ -302,7 +338,7 @@ class BudgetFetcher:
                               confidence = EXCLUDED.confidence
             """, {
                 "src": source_id, "tgt": target_id,
-                "cat": "welfare", "sub": item.get("sub_category"),
+                "cat": item.get("category", "welfare"), "sub": item.get("sub_category"),
                 "val": item["amount_jpy"], "fy": item["fiscal_year"],
                 "conf": item.get("confidence", 0.7),
                 "ds": source.name
@@ -353,21 +389,8 @@ async def get_sankey_data(
     「国庫 → 省庁 → 予算事業 → 助成金 → 受給者」のチェーンを一本のサンキーとして返却。
     描画パフォーマンス保護のため、デフォルトで上位50件の制限と閾値フィルタを設ける。
     """
-    # カテゴリフィルタの組み立て
-    cat_filter = ""
-    params: dict = {
-        "fy": fiscal_year,
-        "min_val": min_value_jpy,
-        "limit": limit
-    }
-    if categories:
-        cat_list = [c.strip() for c in categories.split(",")]
-        cat_filter = "AND e.category = ANY(:cats)"
-        params["cats"] = cat_list
-
-    # edges とその両端の nodes を取得 (Prismaの $queryRaw / Raw SQL経由)
-    # ※ uq_edges_src_tgt_fy 一意制約によりデータ整合性を保証
-    query = f"""
+    # クエリパラメータとプレースホルダの組み立て
+    query = """
         SELECT e.source_id, e.target_id, e.value_jpy,
                n1.name AS source_name, n1.type AS source_type,
                n2.name AS target_name, n2.type AS target_type
@@ -376,10 +399,21 @@ async def get_sankey_data(
         JOIN nodes n2 ON e.target_id = n2.id
         WHERE e.fiscal_year = :fy 
           AND e.value_jpy >= :min_val
-          {cat_filter}
-        ORDER BY e.value_jpy DESC
-        LIMIT :limit
     """
+    
+    params: dict = {
+        "fy": fiscal_year,
+        "min_val": min_value_jpy,
+        "limit": limit
+    }
+    
+    if categories:
+        cat_list = [c.strip() for c in categories.split(",")]
+        query += " AND e.category = ANY(:cats::text[])"
+        params["cats"] = cat_list
+        
+    query += " ORDER BY e.value_jpy DESC LIMIT :limit"
+
     rows = await db.fetch_all(query, params)
 
     # @nivo/sankey 形式へ変換
@@ -426,13 +460,13 @@ def _node_color(node_type: str) -> str:
 
 ## 7. フロントエンド API エンドポイント一覧 (新規)
 
-| メソッド | エンドポイント | 説明 | ビュー |
-|---|---|---|---|
-| `GET` | `/api/v1/flow/sankey` | サンキーダイアグラム用データ (nodes/links) | Money Flow |
-| `GET` | `/api/v1/flow/globe` | 3D地球儀用データ (lat/lng 付きアーク) | Money Flow |
-| `GET` | `/api/v1/grants/list` | 助成金一覧 (フィルタリング・ソート・ページネーション) | Applications |
-| `GET` | `/api/v1/grants/{id}/detail` | 助成金詳細 + AI適合判定結果 | Applications モーダル |
-| `GET` | `/api/v1/grants/{id}/radar` | 4軸期待値レーダーチャートデータ | Applications モーダル |
-| `GET` | `/api/v1/dashboard/summary` | ダッシュボードサマリー (Active grants数・総申請額等) | Dashboard |
-| `GET` | `/api/v1/dashboard/timeline` | 予算カレンダータイムラインデータ | Dashboard |
-| `GET` | `/api/v1/dashboard/agent-status` | Modal AI エージェントの稼働ステータス | Dashboard |
+| メソッド | エンドポイント | 説明 | ビュー | 認証方式 (Auth) | レートリミット |
+|---|---|---|---|---|---|
+| `GET` | `/api/v1/flow/sankey` | サンキーダイアグラム用データ (nodes/links) | Money Flow | なし (Public) | 60 req/min |
+| `GET` | `/api/v1/flow/globe` | 3D地球儀用データ (lat/lng 付きアーク) | Money Flow | なし (Public) | 60 req/min |
+| `GET` | `/api/v1/grants/list` | 助成金一覧 (フィルタリング・ソート・ページネーション) | Applications | JWT (Bearer Token) | 100 req/min |
+| `GET` | `/api/v1/grants/{id}/detail` | 助成金詳細 + AI適合判定結果 | Applications モーダル | JWT (Bearer Token) | 100 req/min |
+| `GET` | `/api/v1/grants/{id}/radar` | 4軸期待値レーダーチャートデータ | Applications モーダル | JWT (Bearer Token) | 100 req/min |
+| `GET` | `/api/v1/dashboard/summary` | ダッシュボードサマリー (Active grants数・総申請額等) | Dashboard | JWT (Bearer Token) | 120 req/min |
+| `GET` | `/api/v1/dashboard/timeline` | 予算カレンダータイムラインデータ | Dashboard | JWT (Bearer Token) | 120 req/min |
+| `GET` | `/api/v1/dashboard/agent-status` | Modal AI エージェントの稼働ステータス | Dashboard | JWT (Bearer Token) | 30 req/min |
