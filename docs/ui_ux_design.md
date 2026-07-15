@@ -71,6 +71,7 @@
 ### 📁 B. 自治体提案 (GovPro BtoG)
 5. **📂 行政資料ライブラリ (Document Library)**
    * **概要**: 総合計画書やRFPファイルのアップロード、GraphRAGインデックス状態の確認。
+   * **依存ライブラリ**: フロントエンドは React 19 / Vite。グラフ描画は `@nivo/sankey`, `recharts`。3D地球儀は `react-globe.gl` を使用。
    * **UX**: 解析の進行度が `Parsing` -> `Extracting` -> `Ready` (ミント色に発光) と推移。
 6. **🤖 提案書ジェネレーター (Proposal Generator)**
    * **概要**: 自治体プロポーザル向けの根拠（エビデンス）付き提案書自動生成エディタ。
