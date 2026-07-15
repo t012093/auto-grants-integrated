@@ -447,3 +447,57 @@ $$ LANGUAGE plpgsql;
     ]
   }
   ```
+
+---
+
+## 5. 発発展的・将来フェーズ仕様 (Phase 3)
+
+### 5.1 採択シミュレーター (RFP Compliance Check)
+* **概要**: AIエージェント群が自治体側の審査官として動作し、作成された提案書（GovPro）が公募仕様書（RFP）の要求を満たしているかをプレ評価します。
+* **APIエンドポイント**: `POST /api/proposals/simulate`
+  * **リクエスト**:
+    ```json
+    {
+      "proposal_text": "# 提案書本文...",
+      "rfp_document_id": "uuid-docs-123"
+    }
+    ```
+  * **バックエンドロジック**: 
+    1. RFPドキュメントから評価項目・配点（例: 実現可能性 30点、地域課題適合度 30点、予算効率性 40点）を自動抽出。
+    2. LLMに「財務審査員」「法務審査員」「地域住民代表」の各プロンプトを与えて並列レビューを実行。
+    3. 合計スコアおよび「どの項目を改善すれば加点されるか」の推敲アドバイスを返却。
+
+### 5.2 デジタル実績証明 (Verifiable Credentials / オープンバッジ)
+* **概要**: ボランティアが活動を完了した際、改ざん防止の施された実績証明書を発行します。
+
+```sql
+-- デジタル実績バッジテーブル
+CREATE TABLE public.digital_badges (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES public.profiles (id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES public.projects (id) ON DELETE CASCADE,
+  badge_type TEXT NOT NULL,                     -- 'VOLUNTEER', 'PROBONO', 'LEADER'
+  verification_hash TEXT NOT NULL UNIQUE,       -- 実績改ざん防止検証用のSHA256ハッシュ
+  metadata JSONB NOT NULL,                      -- { "hours": 12, "skills": ["React", "UI Design"], "completed_at": "2026-07-15" }
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+### 5.3 インパクト・フィードバックループ (Impact Measurement)
+* **概要**: 実行したプロジェクトが地域社会に与えたアウトカム指標をデータベースに格納し、予算フロー画面の終端ノード（`nodes` / `edges`）に動的に紐づけて表示します。
+
+```sql
+-- 社会的インパクト実績テーブル
+CREATE TABLE public.project_impacts (
+  id SERIAL PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES public.projects (id) ON DELETE CASCADE,
+  metric_name TEXT NOT NULL,                    -- 指標名 (例: '子供向け学習支援の実施回数', '車いす送迎回数')
+  metric_value REAL NOT NULL,                   -- 実績数値
+  metric_unit TEXT NOT NULL,                    -- 単位
+  impact_summary TEXT,                          -- AIによる社会的価値の要約
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+* **フローへの統合方法**: 
+  `GET /api/flows/connections` 実行時、プロジェクトノード（Level 4）に `project_impacts` のデータを結合してマージし、UI上で「この資金（¥1,500,000）によって【車いす送迎120回】が実現した」という成果テキストをポップオーバーで表示します。
+
