@@ -71,7 +71,6 @@
 ### 📁 B. 自治体提案 (GovPro BtoG)
 5. **📂 行政資料ライブラリ (Document Library)**
    * **概要**: 総合計画書やRFPファイルのアップロード、GraphRAGインデックス状態の確認。
-   * **依存ライブラリ**: フロントエンドは React 19 / Vite。グラフ描画は `@nivo/sankey`, `recharts`。3D地球儀は `react-globe.gl` を使用。
    * **UX**: 解析の進行度が `Parsing` -> `Extracting` -> `Ready` (ミント色に発光) と推移。
 6. **🤖 提案書ジェネレーター (Proposal Generator)**
    * **概要**: 自治体プロポーザル向けの根拠（エビデンス）付き提案書自動生成エディタ。
@@ -108,4 +107,60 @@
   │ (資金調達完了)
   ▼
 【プロジェクト実行】(Civic Projects) ─► ボランティアやプロボノを募集し、実績を「団体アセット」へ蓄積
+
+---
+
+## 🎨 依存ライブラリとコンポーネント
+
+* **依存ライブラリ**: フロントエンドは React 19 / Vite。グラフ描画は `@nivo/sankey`, `recharts`。3D地球儀は `react-globe.gl` を使用。
+
+---
+
+## 🌗 4. スタイル切り替え機能 (Theme Switcher)
+
+ユーザーの好みや利用シーンに合わせて、ダークSF調の「Cosmic Glass」と、温かみのある北欧モダン「Nordic Organic Glass」を動的に切り替える仕組みをフロントエンドに実装します。
+
+### 4.1 UIインタラクション
+* **配置**: 左固定サイドバーの最下部、設定アイコンの上に **「テーマ切り替えボタン (トグル)」** を設置します。
+* **挙動**: ボタン押下時に、アプリアイコンや背景が滑らかに切り替わるクロスフェード・トランジション（CSSの `transition: background 0.5s ease, color 0.3s ease`）を適用します。
+
+### 4.2 技術的実装（CSS変数切り替え仕様）
+HTMLの `<body>` 要素（またはアプリのルート要素）に適用するクラス（`.theme-cosmic` / `.theme-nordic`）により、CSS変数を一括で切り替えます。
+
+```css
+/* デフォルト: Cosmic Glass (Dark Mode) */
+:root, .theme-cosmic {
+  --bg-app: linear-gradient(135deg, #060913 0%, #0F132A 100%);
+  --surface-glass: rgba(15, 20, 38, 0.45);
+  --border-glass: rgba(255, 255, 255, 0.06);
+  --color-primary: #6366F1;     /* Electric Indigo */
+  --color-accent: #10B981;      /* Neon Mint */
+  --color-civic: #06B6D4;       /* Aqua Blue */
+  --color-text: #F3F4F6;
+  --color-text-muted: #9CA3AF;
+  --blur-glass: blur(16px);
+  --blur-glass-md: blur(12px);
+  --blur-glass-sm: blur(8px);
+}
+
+/* オプション: Nordic Organic Glass (Light Mode) */
+.theme-nordic {
+  --bg-app: linear-gradient(135deg, #FDFBF7 0%, #F5F0E6 100%);
+  --surface-glass: rgba(255, 255, 255, 0.7);
+  --border-glass: rgba(0, 0, 0, 0.06);
+  --color-primary: #E07A5F;     /* Terracotta */
+  --color-accent: #81B29A;      /* Sage Green */
+  --color-civic: #F2CC8F;       /* Dusty Gold */
+  --color-text: #2D3142;
+  --color-text-muted: #6C757D;
+  --blur-glass: blur(12px);
+  --blur-glass-md: blur(8px);
+  --blur-glass-sm: blur(4px);
+  --shadow-glass: 0 8px 32px 0 rgba(0, 0, 0, 0.05);
+}
+```
+
+### 4.3 永続化
+* **ローカルストレージ**: 選択されたテーマは `localStorage.setItem('preferred-theme', theme)` に保存され、リロード時に自動適用されます。
+* **DB連携**: サインイン中のユーザーは、`profiles.preferred_theme` に設定が同期され、複数デバイス間でも同じテーマが引き継がれます。
 ```

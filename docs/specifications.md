@@ -48,6 +48,7 @@ CREATE TABLE public.profiles (
   avatar_url TEXT,
   bio TEXT,
   interest_areas TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
+  preferred_theme TEXT NOT NULL DEFAULT 'cosmic', -- 'cosmic' (Dark) or 'nordic' (Light)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );
