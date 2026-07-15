@@ -49,6 +49,7 @@ CREATE TABLE public.profiles (
   bio TEXT,
   interest_areas TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
   preferred_theme TEXT NOT NULL DEFAULT 'cosmic', -- 'cosmic' (Dark) or 'nordic' (Light)
+  embedding vector(4096), -- ユーザープロファイル・スキルベクトル (Modal用)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );
@@ -315,6 +316,7 @@ CREATE TABLE public.projects (
   status public.project_status NOT NULL DEFAULT 'DRAFT',
   participants INTEGER NOT NULL DEFAULT 0,
   max_participants INTEGER NOT NULL DEFAULT 1,
+  embedding vector(4096), -- プロジェクト要求・目的ベクトル (Modal用)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );
@@ -379,5 +381,46 @@ $$ LANGUAGE plpgsql;
 | 富山市RSS収集 | 日次 02:00 JST | `0 2 * * *` | 富山市公式RSSフィードのパース・新規補助金追加 |
 | 富山県ページ差分 | 日次 02:30 JST | `30 2 * * *` | 富山県新着ページのハッシュ比較とLLMによる構造化 |
 | jGrants同期 | 日次 03:00 JST | `0 3 * * *` | jGrants WebAPIからの全国補助金情報の同期取得 |
-| 予算データ収集 | 週次 月曜03:30 JST | `30 3 * * 1` | 財務省/厚労省/こども家庭庁予算PDFの解析・格納 |
-| 交付金カスケード | 週次 月曜04:00 JST | `0 4 * * 1` | 国の交付金→県の事業計画→市の実施計画の紐付け解析 |
+| 予算データ収集 | 週次 月曜03:30 JST | `30 3 * * 1` | `collectors/budget_fetch.py` |
+| 交付金カスケード | 週次 月曜04:00 JST | `0 4 * * 1` | `collectors/cascade_watch.py` |
+
+---
+
+## 4. ボランティア・スキルマッチング仕様 (RAG基盤流用)
+
+助成金RAGで使用している Modal GPU インフラ（Qwen3-Embedding-8B + BgeReranker v2-m3）と Supabase ベクトルストアを再利用し、ボランティアとプロジェクトのスキルマッチングを行います。
+
+### 4.1 ベクトル生成データソースマッピング
+
+* **プロジェクト要求ベクトル (`projects.embedding`)**:
+  * **ソース**: プロジェクトの `title`、`description`（活動詳細）、`category`、`impact_goal`、および `needed_resources`（必要なスキルアセット）を結合したテキスト。
+* **ユーザープロフィールベクトル (`profiles.embedding`)**:
+  * **ソース**: ユーザーの `display_name`、`bio`（自己紹介）、`interest_areas`、および `members` や `project_applications` (過去の完了活動実績) から動的に構築した活動経歴サマリーテキスト。
+
+### 4.2 マッチングアルゴリズム
+1. **SQL事前フィルタ (一次絞り込み)**:
+   * スケジュール（`event_date` が未来）、地域（`location` が一致またはリモート可）、募集人数（`participants < max_participants`）に合致するプロジェクトに絞り込み。
+2. **コサイン類似度検索 (二次絞り込み)**:
+   * `profiles.embedding` と `projects.embedding` のコサイン類似度を pgvector を使って計算。上位10件を抽出。
+3. **リランキング (最終スコアリング)**:
+   * Modal上の `BgeReranker v2-m3` に、ユーザーの活動経歴テキストとプロジェクト概要テキストのペアを送信し、クロスエンコーダによる最終類似度 `match_score` (0.0 - 1.0) を算出。
+4. **説明テキストの自動生成 (Explainable Matching)**:
+   * スコア上位の案件に対し、LLM (Gemini/Claude) を用いて「なぜあなたにこの案件がおすすめなのか」のパーソナライズされた推薦理由（2〜3行）を自動生成。
+
+### 4.3 API エンドポイント仕様
+
+#### `GET /api/matches/projects` (おすすめプロジェクト一覧)
+* **認証**: 必要 (Bearer Token)
+* **クエリパラメータ**: `limit` (デフォルト 10)
+* **レスポンス**:
+  ```json
+  [
+    {
+      "project_id": "uuid-xxx",
+      "title": "富山市こどもプログラミング教室サポート",
+      "npo_name": "Open Coral Network",
+      "match_score": 0.92,
+      "match_reason": "あなたは過去に『IT支援ボランティア』の経験があり、このプロジェクトが必要とするプログラミング指導補助の要件に合致しています。"
+    }
+  ]
+  ```
