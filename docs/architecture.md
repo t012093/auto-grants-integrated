@@ -16,6 +16,7 @@ graph TD
         DS3["こども家庭庁<br>(PDF/Excel)"]
         DS4["ミラサポplus"]
         DS5["市民・企業ドナー<br>(クラファン寄付)"]
+        DS6["民間助成金ポータル<br>(助成財団HP/RSS)"]
     end
 
     subgraph BudgetSources["予算・財政データソース"]
@@ -30,6 +31,7 @@ graph TD
         CL3["Cascade Tracker (交付金リンク追跡)"]
         CL4["Budget & Zaisei Fetcher"]
         CL5["Supabase Realtime Sync (クラファン/応募)"]
+        CL6["Private Grant Fetcher"]
     end
 
     subgraph Processing["処理・エージェントレイヤー"]
@@ -74,6 +76,7 @@ graph TD
     DS3 --> CL3
     DS4 --> CL1
     DS5 --> CL5
+    DS6 --> CL6
 
     BS1 --> CL4
     BS2 --> CL4
@@ -84,6 +87,7 @@ graph TD
     CL3 --> PR1
     CL4 --> PR1
     CL5 --> DB
+    CL6 --> PR1
 
     PR1 --> AI1
     AI1 --> DB_V
@@ -120,7 +124,7 @@ graph TD
 | **Processing** | データ構造化・エージェント | `BeautifulSoup` + `LLM` によるテキスト抽出。自治体基本計画のGraphRAGコミュニティ生成。プロソーシャル（市民合意）指標の算出。 |
 | **AI/Embedding** | セマンティック処理 | Modal GPU上のQwen3 (4096次元) で統一。BgeRerankerによる高精度リランキング。 |
 | **Security & Privacy** | 信頼・プライバシー保護 | W3C規格の **DID（分散型ID）** を用いた自己主権型認証、および **zk-SNARKs** を用いた個人情報不要の実績・住民属性証明。 |
-| **Data** | 永続化とリアルタイム連携 | PostgreSQL (Supabase) 上に、助成金、予算フロー、クラファン、プロジェクト（ボランティア）、市民投票、団体アセット、およびZKP検証用資格（VC）テーブルを一元化。 |
+| **Data** | 永続化とリアルタイム連携 | PostgreSQL (Supabase) 上に、助成金、予算フロー、クラファン、プロジェクト（ボランティア）、市民投票、団体アセット、およびZKP検証用資格（VC）の全テーブルを一元化。Row Level Security (RLS) によるセキュリティ確保。 |
 | **Application** | ロジック・インターフェース | FastAPIによるAIエージェントのオーケストレーション、ZKP検証エンジン、外部接続用MCPサーバー。 |
 | **Frontend** | ユーザーインターフェース | React 19 + Vite。「Cosmic Glass」デザインシステムを採用した、左固定多階層ナビゲーションによるSPA。 |
 | **Interface** | マルチチャネルアクセス | Web UI、Slack/LINE/Emailによる期日・応募通知、Claudeによる自然言語MCP操作。 |
@@ -157,6 +161,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Wallet as シビック・ウォレット (WASM)
+    participant CDN as パラメータ配信 (CDN)
     participant Issuer as 発行者 (NPO/自治体)
     participant DB as Supabase (ZKP / VCストア)
     participant Verifier as 検証者 (自治体/AI審査官)
@@ -165,11 +170,17 @@ sequenceDiagram
     Issuer->>Wallet: ボランティア実績 / 住民権の暗号署名データ(VC)を発行
     Wallet->>Wallet: ウォレット（ブラウザ）へ実績の生データを安全に格納
 
-    %% 証明・検証フェーズ
-    Wallet->>Wallet: 生データから「合計活動時間 >= 50」のゼロ知識証明(zk_proof)を生成 (zk-SNARKs)
-    Wallet->>DB: zk_proof とコミットメントハッシュを登録
-    Verifier->>DB: ユーザーの zk_proof とコミットメントをロード
-    Verifier->>Verifier: 公開パラメータを用いて ZKP の正当性を検証 (生データは見えない)
+    %% 証明・検証フェーズ (初期化含む)
+    Note over Wallet, CDN: [初期化] 証明生成に必要な回路ファイル (.wasm) と証明鍵 (.zkey) をロード
+    Wallet->>CDN: 回路パラメータ (proving_key.zkey) をリクエスト
+    CDN-->>Wallet: パラメータデータを返却・キャッシュ
+    Wallet->>Wallet: 生データと proving_key から「合計活動時間 >= 50」のゼロ知識証明(zk_proof)を生成 (Groth16)
+    Wallet->>DB: zk_proof と commitment_hash を登録
+    
+    %% 検証フェーズ
+    Note over Verifier, CDN: [初期化] 検証キー (verification_key.json) をロード
+    Verifier->>DB: ユーザーの zk_proof と commitment_hash をロード
+    Verifier->>Verifier: 検証キーと公開シグナルを用いて ZKP の正当性を検証 (生データは見えない)
     Verifier-->>Verifier: 検証成功 (属性が真であることを承認)
 ```
 
@@ -222,10 +233,10 @@ graph LR
 | `--blur-glass` | `blur(16px)` | 背景の磨りガラス（ぼかし）フィルター (パネル用) |
 | `--blur-glass-md` | `blur(12px)` | 背景の磨りガラス（ぼかし）フィルター (カード用) |
 | `--blur-glass-sm` | `blur(8px)` | 背景の磨りガラス（ぼかし）フィルター (ボタン用) |
-| `--color-indigo` | `#6366F1` | プライマリ・AI・ジェネレーター用アクセント |
-| `--color-mint` | `#10B981` | 資金・適合・正常ステータス用アクセント |
-| `--color-aqua` | `#06B6D4` | 市民参加・Plurality・合意形成用アクセント |
-| `--color-coral` | `#EF4444` | アラート・締切・エラー用アクセント |
+| `--color-primary` | `#6366F1` | プライマリ・AI・ジェネレーター用アクセント (Cosmic) / Terracotta (Nordic) |
+| `--color-accent` | `#10B981` | 資金・適合・正常ステータス用アクセント (Cosmic) / Sage Green (Nordic) |
+| `--color-civic` | `#06B6D4` | 市民参加・Plurality・合意形成用アクセント (Cosmic) / Dusty Gold (Nordic) |
+| `--color-alert` | `#EF4444` | アラート・締切・エラー用アクセント (Cosmic) / Nordic Red (Nordic) |
 | `--font-display` | `Outfit` | タイトル、見出し、ヘッダー |
 | `--font-sans` | `Inter` | 本文、ログ、コード表示 |
 

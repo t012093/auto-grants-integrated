@@ -107,8 +107,8 @@ FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
 -- 組織メンバー
 CREATE TABLE public.members (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_kind public.entity_kind NOT NULL,
-  organization_id UUID NOT NULL, -- company_profiles または npo_profiles のID
+  company_profile_id UUID REFERENCES public.company_profiles (id) ON DELETE CASCADE,
+  npo_profile_id UUID REFERENCES public.npo_profiles (id) ON DELETE CASCADE,
   user_id UUID REFERENCES public.profiles (id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   role public.app_user_role NOT NULL,
@@ -116,13 +116,66 @@ CREATE TABLE public.members (
   avatar_url TEXT,
   bio TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
+  -- 参照整合性を保証するため、いずれか片方の組織IDのみが非NULLであることを制約
+  CONSTRAINT chk_members_org_exclusivity CHECK (
+    (company_profile_id IS NOT NULL AND npo_profile_id IS NULL) OR
+    (company_profile_id IS NULL AND npo_profile_id IS NOT NULL)
+  )
 );
+
+CREATE TRIGGER set_members_updated_at
+BEFORE UPDATE ON public.members
+FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+
+-- コア認証・プロフィール RLS (Row Level Security) ポリシー設定
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.npo_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.company_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.members ENABLE ROW LEVEL SECURITY;
+
+-- 1. profiles: ユーザー自身は全権、他者は一部公開項目のみ参照可能
+CREATE POLICY profile_self_policy ON public.profiles
+  FOR ALL USING (id = auth.uid());
+CREATE POLICY profile_public_read_policy ON public.profiles
+  FOR SELECT USING (true);
+
+-- 2. npo_profiles: 所有者のみ編集可能、他者は参照可能
+CREATE POLICY npo_profile_owner_policy ON public.npo_profiles
+  FOR ALL USING (owner_user_id = auth.uid());
+CREATE POLICY npo_profile_public_read_policy ON public.npo_profiles
+  FOR SELECT USING (true);
+
+-- 3. company_profiles: 所有者のみ編集可能、他者は参照可能
+CREATE POLICY company_profile_owner_policy ON public.company_profiles
+  FOR ALL USING (owner_user_id = auth.uid());
+CREATE POLICY company_profile_public_read_policy ON public.company_profiles
+  FOR SELECT USING (true);
+
+-- 4. members: 同一組織の所属メンバーのみが閲覧・編集可能
+CREATE POLICY member_access_policy ON public.members
+  FOR ALL USING (
+    user_id = auth.uid() OR
+    EXISTS (
+      SELECT 1 FROM public.members m
+      WHERE m.user_id = auth.uid() AND (
+        (m.company_profile_id IS NOT NULL AND m.company_profile_id = public.members.company_profile_id) OR
+        (m.npo_profile_id IS NOT NULL AND m.npo_profile_id = public.members.npo_profile_id)
+      )
+    )
+  );
 ```
 
 ### 1.2 助成金・予算・自治体RAG（auto-grantsv2 & moneyflow-visualizer）
 
 ```sql
+-- 助成金区分の定義 (公的・民間・クラファン等の分離識別用)
+CREATE TYPE public.grant_category AS ENUM (
+  'PUBLIC',         -- 公的助成金・補助金 (jGrants, 自治体公募)
+  'PRIVATE',        -- 民間助成金 (民間財団、企業助成)
+  'DONATION_CF'     -- クラウドファンディング等の寄付・資金調達
+);
+
 -- 助成金データ本体
 CREATE TABLE public.grants (
   id SERIAL PRIMARY KEY,
@@ -131,6 +184,8 @@ CREATE TABLE public.grants (
   amount_max BIGINT,
   deadline DATE,
   details_url TEXT,
+  category public.grant_category NOT NULL DEFAULT 'PUBLIC', -- 助成金区分
+  source TEXT NOT NULL, -- データ取得元 (例: 'jgrants', 'toyama_pref', 'private_grant_portal_x')
   payload_json JSONB NOT NULL DEFAULT '{}'::JSONB,
   cascade_id INTEGER, -- 交付金カスケードIDへの参照 (Nullable)
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -139,6 +194,8 @@ CREATE TABLE public.grants (
 
 CREATE INDEX idx_grants_payload_data_hash ON public.grants ((payload_json->>'data_hash'));
 CREATE INDEX idx_grants_cascade_id ON public.grants(cascade_id);
+CREATE INDEX idx_grants_category ON public.grants(category);
+CREATE INDEX idx_grants_source ON public.grants(source);
 
 -- ベクトル知識チャンク (Modal GPU Embedding用)
 CREATE TABLE public.knowledge_chunks (
@@ -161,7 +218,7 @@ CREATE TABLE public.nodes (
   lat REAL,
   lng REAL,
   region TEXT,
-  type TEXT NOT NULL,                    -- 'country', 'ministry', 'subsidy', 'recipient_org' 等
+  type TEXT NOT NULL,                    -- 'country', 'ministry', 'subsidy', 'recipient_org', 'vision', 'policy', 'project' 等
   dataset TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -192,10 +249,27 @@ CREATE TABLE public.data_sources (
   name_ja TEXT,                          -- 日本語表示名
   url TEXT,                              -- 情報元URL
   description TEXT,                      -- データソース概要
-  data_format TEXT,                      -- 形式 (API/JSON, PDF, Excel等)
   fiscal_years TEXT,                     -- 対象年度範囲
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 助成金・予算・RAGデータ RLS (Row Level Security) ポリシー設定
+ALTER TABLE public.grants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.knowledge_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.nodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.edges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.data_sources ENABLE ROW LEVEL SECURITY;
+
+-- 全ユーザーが SELECT (読み取り) 可能
+CREATE POLICY grants_read_policy ON public.grants FOR SELECT USING (true);
+CREATE POLICY knowledge_chunks_read_policy ON public.knowledge_chunks FOR SELECT USING (true);
+CREATE POLICY nodes_read_policy ON public.nodes FOR SELECT USING (true);
+CREATE POLICY edges_read_policy ON public.edges FOR SELECT USING (true);
+CREATE POLICY data_sources_read_policy ON public.data_sources FOR SELECT USING (true);
+
+-- ※ INSERT/UPDATE/DELETE に関するポリシーは定義しません。
+--    これにより、Supabase 上の一般ユーザー (authenticated/anon) からの書き込みはすべてブロックされ、
+--    RLSをバイパスする service_role キーを用いたバックエンドバッチ処理からのみ書き込み可能となります。
 ```
 
 ### 1.3 市民合意・投票（plurality-connect 新規実装分仕様）
@@ -377,13 +451,14 @@ $$ LANGUAGE plpgsql;
 
 ## 3. スケジュール実行 (Cron) の更新
 
-| ジョブ名 | 実行頻度 | cron式 | 説明 |
-|---|---|---|---|
-| 富山市RSS収集 | 日次 02:00 JST | `0 2 * * *` | 富山市公式RSSフィードのパース・新規補助金追加 |
-| 富山県ページ差分 | 日次 02:30 JST | `30 2 * * *` | 富山県新着ページのハッシュ比較とLLMによる構造化 |
-| jGrants同期 | 日次 03:00 JST | `0 3 * * *` | jGrants WebAPIからの全国補助金情報の同期取得 |
-| 予算データ収集 | 週次 月曜03:30 JST | `30 3 * * 1` | `collectors/budget_fetch.py` |
-| 交付金カスケード | 週次 月曜04:00 JST | `0 4 * * 1` | `collectors/cascade_watch.py` |
+| ジョブ名 | 実行頻度 | cron式 | 説明 | パッケージパス |
+|---|---|---|---|---|
+| 富山市RSS収集 | 日次 02:00 JST | `0 2 * * *` | 富山市公式RSSフィードのパース・新規補助金追加 | `collectors/public/diff_toyama_city.py` |
+| 富山県ページ差分 | 日次 02:30 JST | `30 2 * * *` | 富山県新着ページのハッシュ比較とLLMによる構造化 | `collectors/public/diff_toyama_pref.py` |
+| jGrants同期 | 日次 03:00 JST | `0 3 * * *` | jGrants WebAPIからの全国補助金情報の同期取得 | `collectors/public/jgrants_sync.py` |
+| 予算データ収集 | 週次 月曜03:30 JST | `30 3 * * 1` | `collectors/budget_fetch.py` | - |
+| 交付金カスケード | 週次 月曜04:00 JST | `0 4 * * 1` | `collectors/cascade_watch.py` | - |
+| 民間助成金収集 | 週次 日曜05:00 JST | `0 5 * * 0` | 民間助成財団の公募情報の収集・LLM構造化 | `collectors/private/private_grant_fetcher.py` |
 
 ---
 
@@ -472,12 +547,22 @@ $$ LANGUAGE plpgsql;
 * **概要**: W3C標準の検証可能資格（VC）および zk-SNARKs を用いて、ユーザーが個人情報を開示せずに、住民権や活動実績を証明する仕様。
 
 ```sql
+-- 信頼できる発行者 (Trusted Issuers) ホワイトリスト
+CREATE TABLE public.trusted_issuers (
+  did TEXT PRIMARY KEY,                         -- 発行者のDID
+  name TEXT NOT NULL,                           -- 発行者名 (自治体名、NPO法人名など)
+  is_active BOOLEAN NOT NULL DEFAULT true,      -- アクティブ状態
+  created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW()),
+  updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW())
+);
+
 -- ZKP対応 検証可能資格 (Verifiable Credentials) ストア
 CREATE TABLE public.zk_verifiable_credentials (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  issuer_did TEXT NOT NULL,                     -- 発行者(認定NPOや自治体)のDID
-  holder_did TEXT NOT NULL REFERENCES public.profiles (did) ON DELETE CASCADE,
-  credential_type TEXT NOT NULL,                -- 'VOLUNTEER_HOURS', 'RESIDENT_PROOF'
+  issuer_did TEXT NOT NULL REFERENCES public.trusted_issuers (did) ON DELETE RESTRICT, -- 発行者DID (ホワイトリスト制限)
+  holder_id UUID NOT NULL REFERENCES public.profiles (id) ON DELETE CASCADE,           -- DB内部リレーション用
+  holder_did TEXT NOT NULL,                                                            -- VC仕様準拠のホルダーDID（非FK、暗号検証用）
+  credential_type TEXT NOT NULL,                                                       -- 'VOLUNTEER_HOURS', 'RESIDENT_PROOF'
   
   -- 生の実績・属性データを暗号学的にコミットして隠蔽したハッシュ
   commitment_hash TEXT NOT NULL UNIQUE,
@@ -485,9 +570,74 @@ CREATE TABLE public.zk_verifiable_credentials (
   -- クライアント側 (WASM) で生成された zk-SNARKs (Groth16等) の証明データ
   zk_proof JSONB NOT NULL,
   
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  -- 資格の有効性フラグ (DIDローテーションや明示的な失効処理でfalseに設定される)
+  is_valid BOOLEAN NOT NULL DEFAULT true,
+  
+  created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW())
 );
+
+-- 資格失効リスト (DIDローテーションや鍵紛失時の無効化管理用)
+CREATE TABLE public.revocation_list (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  credential_id UUID REFERENCES public.zk_verifiable_credentials (id) ON DELETE CASCADE,
+  revoked_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
+  reason TEXT
+);
+
+-- RLS (Row Level Security) ポリシー設定
+ALTER TABLE public.zk_verifiable_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.revocation_list ENABLE ROW LEVEL SECURITY;
+
+-- ホルダー本人は自身のVCを閲覧・削除可能
+CREATE POLICY zk_vc_holder_policy ON public.zk_verifiable_credentials
+  FOR ALL
+  USING (holder_id = auth.uid());
+
+-- 検証者は検証用に有効な証明のみ読み込み可能
+CREATE POLICY zk_vc_verifier_policy ON public.zk_verifiable_credentials
+  FOR SELECT
+  USING (is_valid = true);
+
+-- 失効リストの読み取りポリシー
+CREATE POLICY revocation_list_read_policy ON public.revocation_list
+  FOR SELECT
+  USING (true);
 ```
+
+#### 5.2.1 zk_proof スキーマと検証仕様
+* **zk_proof カラム期待スキーマ (Groth16 形式)**:
+  `zk_proof` カラムに格納される JSONB データは、以下のスキーマを満たす必要があります。
+  ```json
+  {
+    "pi_a": ["string", "string", "string"],
+    "pi_b": [
+      ["string", "string"],
+      ["string", "string"],
+      ["string", "string"]
+    ],
+    "pi_c": ["string", "string", "string"],
+    "public_signals": ["string"]
+  }
+  ```
+  * **データサイズ上限**: 10KB（アプリケーションレイヤーでのバリデーションで強制）。
+  * **使用ツール/プロトコル**: 回路記述は `Circom`、証明システムは `Groth16` (snarkjs) を使用。バックエンドの検証エンジン（Node.js / FastAPI）に事前にデプロイした `verification_key.json` をロードし、`snarkjs.groth16.verify` にて暗号学的な整合性を検証する。
+
+#### 5.2.2 DID ローテーションと移行ポリシー
+1. **DID ローテーションの定義**: ホルダーがセキュリティ等の理由で自身の公開鍵を変更し、新しい DID（`profiles.did`）を生成すること。
+2. **VC 移行ポリシーと無効化**: 
+   * `zk_verifiable_credentials` レコードは `holder_id` (UUID) により `profiles` と紐づいているため、DIDの変更によってレコード自体が自動的に削除されることはありません。
+   * しかし、古い DID 署名に基づいた VC はセキュリティリスクとなるため、ローテーション完了時に、古い `holder_did` を持つすべての既存 VC レコードは `is_valid = false` に自動的に更新（失効）され、同時に `revocation_list` テーブルに失効記録（理由: 'DID_ROTATION'）が挿入されます。
+   * 失効した VC は検証者から参照できなくなります（RLSポリシーによりブロック）。
+   * ユーザーは、新しい DID に紐づく新規 VC の再発行（Re-issuance）を発行者（Issuer）にリクエストし、新しい ZKP 証明を生成して登録する必要があります。
+
+#### 5.2.3 旧 `digital_badges` テーブルからのマイグレーション計画
+テーブル名の変更（`digital_badges` → `zk_verifiable_credentials`）は破壊的変更であるため、以下の移行手順を実施します。
+1. **依存コードの改修**: 既存の `digital_badges` を参照しているフロントエンド UI（実績一覧）および API エンドポイントを、`zk_verifiable_credentials` を参照する仕様に変更します。
+2. **移行用 SQL スクリプトの実行**:
+   * 新しい `trusted_issuers` テーブルおよび `zk_verifiable_credentials` テーブルを作成。
+   * プラットフォーム自体のシステム DID を初期値として `trusted_issuers` に登録。
+   * 既存の `digital_badges` のレコードを移行するため、`user_id` を `holder_id` にマッピングし、適当なプレースホルダー `holder_did` (ユーザーがDID未生成の場合はダミーDID `did:key:...`)、およびダミーの `commitment_hash` と `zk_proof` (ダミー証明データ) を作成してデータをインポート。
+   * インポート完了後、旧 `digital_badges` テーブルを削除。
 
 ### 5.3 インパクト・フィードバックループ (Impact Measurement)
 * **概要**: 実行したプロジェクトが地域社会に与えたアウトカム指標をデータベースに格納し、予算フロー画面の終端ノード（`nodes` / `edges`）に動的に紐づけて表示します。

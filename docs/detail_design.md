@@ -68,21 +68,108 @@ async def upsert_subsidies(self, raw_subsidies: list[dict]) -> tuple[int, int]:
         item['data_hash'] = data_hash
         
         if existing:
-            # 既存レコードをアップデート (ドライバ依存エラー防止のため明示的に::jsonbキャスト)
-            await self.db.execute(
-                "UPDATE grants SET name = :name, payload_json = :payload::jsonb, updated_at = NOW() WHERE id = :id",
-                {"name": item['title'], "payload": json.dumps(item), "id": existing['id']}
-            )
+            # 既存レコードをアップデート
+            await self.db.execute("""
+                UPDATE grants 
+                SET title = :title, provider = :provider, category = 'PUBLIC', 
+                    payload_json = :payload::jsonb, updated_at = NOW() 
+                WHERE id = :id
+            """, {
+                "title": item['title'], 
+                "provider": item.get('agency', '富山県'), 
+                "payload": json.dumps(item), 
+                "id": existing['id']
+            })
             updated_count += 1
         else:
-            # 新規レコードをインサート (ドライバ依存エラー防止のため明示的に::jsonbキャスト)
-            await self.db.execute(
-                "INSERT INTO grants (name, source, payload_json, created_at, updated_at) VALUES (:name, 'toyama_pref', :payload::jsonb, NOW(), NOW())",
-                {"name": item['title'], "payload": json.dumps(item)}
-            )
+            # 新規レコードをインサート
+            await self.db.execute("""
+                INSERT INTO grants (title, provider, category, source, payload_json, created_at, updated_at) 
+                VALUES (:title, :provider, 'PUBLIC', 'toyama_pref', :payload::jsonb, NOW(), NOW())
+            """, {
+                "title": item['title'], 
+                "provider": item.get('agency', '富山県'), 
+                "payload": json.dumps(item)
+            })
             new_count += 1
             
     return new_count, updated_count
+
+
+### 1.2 民間助成金コレクター (`collectors/private/private_grant_fetcher.py`)
+
+#### クラス構成と処理フロー
+```python
+class PrivateGrantFetcher:
+    """
+    民間助成情報ポータルまたは特定の助成財団のWebページ・RSSをクローリングし、
+    LLMによる構造化を経て grants テーブルに category='PRIVATE' として保存する。
+    """
+    def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient):
+        self.db = db_client
+        self.llm = llm_client
+        self.source_name = "private_grant_portal_x"
+        self.url = "https://example-private-grants.org/list.html"
+
+    async def run(self) -> CollectorResult:
+        # 1. ページ取得
+        html = await self.fetch_html()
+        
+        # 2. クレンジング
+        clean_text = self.clean_html(html)
+        
+        # 3. LLMを用いた民間助成金情報の構造化抽出
+        # ※民間特有の項目（財団の設立趣旨、適合する特定NPO活動領域など）を抽出
+        raw_grants = await self.extract_private_grants_via_llm(clean_text)
+        
+        # 4. 重複排除 (Upsert) 処理
+        new_count, updated_count = await self.upsert_private_grants(raw_grants)
+        
+        return CollectorResult(status="success", items_found=new_count, message=f"Added {new_count}, updated {updated_count}")
+
+    async def upsert_private_grants(self, raw_grants: list[dict]) -> tuple[int, int]:
+        new_count = 0
+        updated_count = 0
+        
+        for item in raw_grants:
+            # 重複排除用のキー (タイトル、提供団体名、締切日) を元にハッシュ生成
+            unique_string = f"{item['title']}_{item['provider']}_{item.get('deadline', '')}"
+            data_hash = hashlib.sha256(unique_string.encode('utf-8')).hexdigest()
+            item['data_hash'] = data_hash
+            
+            existing = await self.db.fetch_one(
+                "SELECT id FROM grants WHERE payload_json->>'data_hash' = :data_hash",
+                {"data_hash": data_hash}
+            )
+            
+            if existing:
+                # 既存レコードの更新 (category='PRIVATE' を維持)
+                await self.db.execute("""
+                    UPDATE grants 
+                    SET title = :title, provider = :provider, category = 'PRIVATE',
+                        payload_json = :payload::jsonb, updated_at = NOW() 
+                    WHERE id = :id
+                """, {
+                    "title": item['title'],
+                    "provider": item['provider'],
+                    "payload": json.dumps(item),
+                    "id": existing['id']
+                })
+                updated_count += 1
+            else:
+                # 新規レコードの登録
+                await self.db.execute("""
+                    INSERT INTO grants (title, provider, category, source, payload_json, created_at, updated_at) 
+                    VALUES (:title, :provider, 'PRIVATE', :source, :payload::jsonb, NOW(), NOW())
+                """, {
+                    "title": item['title'],
+                    "provider": item['provider'],
+                    "source": self.source_name,
+                    "payload": json.dumps(item)
+                })
+                new_count += 1
+                
+        return new_count, updated_count
 ```
 
 ---
@@ -166,6 +253,29 @@ class MockEmbeddingService(EmbeddingServiceBase):
     async def rerank(self, query: str, passages: list[str]) -> list[float]:
         # 単純なインデックス順に降順のダミースコアを返却
         return [1.0 - (i * 0.01) for i in range(len(passages))]
+
+
+# 3.2 Modalコールドスタート時のローカルフォールバック検索仕様
+# Modalが起動するまでの最大3分間、またはオフライン環境において、pg_trgm（日本語3-gram）を用いた
+# トリグラム類似度検索を PostgreSQL/Supabase 側で実行して暫定的な検索結果を返す。
+#
+# [SQL インデックスの作成（事前適用前提）]
+# CREATE EXTENSION IF NOT EXISTS pg_trgm;
+# CREATE INDEX IF NOT EXISTS idx_grants_title_trgm ON public.grants USING gin (title gin_trgm_ops);
+#
+# [ローカルフォールバック用 SQL クエリ]
+# SELECT id, title, provider, amount_max, deadline, details_url, payload_json,
+#        similarity(title, :query) AS text_score
+# FROM public.grants
+# WHERE title % :query -- トリグラム類似度閾値（デフォルト0.3）以上のものを抽出
+#   AND category = :category -- 助成金区分（PUBLIC/PRIVATE）によるフィルタリング
+# ORDER BY text_score DESC
+# LIMIT :limit;
+#
+# [API 側での切り替え判定]
+# 1. API リクエスト受信時、まず Modal AI インフラにヘルスチェック（ ping / 起動状態確認 ）を送信。
+# 2. 応答がタイムアウト、または 503 (コールドスタート中) の場合、ローカルフォールバック検索を実行。
+# 3. レスポンスに 'is_fallback: true' を含めてフロントエンドに返し、UI上で「AI検索起動中のため暫定結果を表示中...」のステータスとプログレスバー（3分目安）を描画する。
 ```
 
 ---
@@ -286,6 +396,8 @@ class BudgetFetcher:
         name = entity_name.lower()
         if "日本" in name or "国庫" in name:
             return "country"
+        elif "一般会計" in name or "特別会計" in name or "支出" in name:
+            return "mof_expenditure"
         elif "省" in name or "庁" in name:
             return "ministry"
         elif "県" in name or "市" in name or "都" in name or "道" in name:
@@ -338,7 +450,7 @@ class BudgetFetcher:
                               confidence = EXCLUDED.confidence
             """, {
                 "src": source_id, "tgt": target_id,
-                "cat": item.get("category", "welfare"), "sub": item.get("sub_category"),
+                "cat": item.get("category", "subsidy_grant"), "sub": item.get("sub_category"),
                 "val": item["amount_jpy"], "fy": item["fiscal_year"],
                 "conf": item.get("confidence", 0.7),
                 "ds": source.name
@@ -449,11 +561,43 @@ def _node_color(node_type: str) -> str:
         "country": "#5e5ce6",       # --color-primary
         "mof_expenditure": "#706ffd",
         "ministry": "#5e5ce6",
-        "subsidy": "#30d158",        # --color-accent-mint
+        "subsidy": "#30d158",        # --color-accent
         "recipient_org": "#30d158",
         "prefecture": "#64748b",
+        "vision": "#06b6d4",        # --color-civic (Aqua Blue)
+        "policy": "#6366f1",        # --color-primary (Electric Indigo)
+        "project": "#10b981",       # --color-accent (Neon Mint)
     }
     return colors.get(node_type, "#94a3b8")
+```
+
+## 6.4 助成金期待値評価（4軸スコア）の保存・計算仕様
+RAG適合判定時に、LLM (Gemini/Claude) を用いて助成金に対する団体の期待値スコア（0〜100）を算出し、`grants` テーブルの `payload_json` に格納します。これにより、一覧表示やレーダーチャート描画（`GET /api/v1/grants/{id}/radar`）を高速に処理します。
+
+### データの保存スキーマ (`grants.payload_json`)
+```json
+{
+  "evaluation_scores": {
+    "amount_efficiency": 85,    -- 金額効率 (金額に対する書類作成・報告コストのバランス)
+    "adoption_likelihood": 70,  -- 採択見込み (過去実績と適合度による確率推定)
+    "document_burden": 40,      -- 書類負担 (反比例値: スコアが高いほど負担が少ない)
+    "strategic_alignment": 95    -- 戦略整合性 (団体の活動方針と助成目標の適合度)
+  }
+}
+```
+
+### 期待値の計算タイミング
+1. **初期構造化時**: 助成金情報が収集されて `grants` に初めて登録される際、または自団体のプロフィールが更新された際に、バックグラウンドのバッチ処理（AI適合判定タスク）によって自動的にスコアを計算し、`payload_json` 内にキャッシュします。
+2. **API レスポンスの生成**: `GET /api/v1/grants/{id}/radar` が呼び出された際は、DB から `payload_json->'evaluation_scores'` を抽出し、そのままフロントエンドが解釈できるフォーマットで即座に返却します（オンザフライ計算による遅延を防ぎます）。
+
+### 【設計備考】公的・民間での評価基準（モデルプロンプト）の差異
+助成金の区分（`category = 'PUBLIC'` または `'PRIVATE'`) に応じて、LLM の判定ロジックおよび適合度スコア算出のプロンプトを以下のように分岐させます。
+*   **戦略整合性 (`strategic_alignment`)**:
+    *   **公的 (PUBLIC)**: 自治体の総合計画・個別施策（政策目標）との整合性を評価。
+    *   **民間 (PRIVATE)**: 助成財団の設立趣旨、活動助成テーマ、および対象領域（NPO活動分野）との親和性を評価。
+*   **書類負担 (`document_burden`)**:
+    *   **公的 (PUBLIC)**: 国・県・市特有の複雑な会計基準、厳格な入札・証憑管理、実績報告書のフォーマット負担を評価。
+    *   **民間 (PRIVATE)**: 財団ごとの簡略化された報告フロー、または中間支援組織を通じた柔軟な経費報告基準を反映。
 ```
 
 ---
@@ -464,7 +608,7 @@ def _node_color(node_type: str) -> str:
 |---|---|---|---|---|---|
 | `GET` | `/api/v1/flow/sankey` | サンキーダイアグラム用データ (nodes/links) | Money Flow | なし (Public) | 60 req/min |
 | `GET` | `/api/v1/flow/globe` | 3D地球儀用データ (lat/lng 付きアーク) | Money Flow | なし (Public) | 60 req/min |
-| `GET` | `/api/v1/grants/list` | 助成金一覧 (フィルタリング・ソート・ページネーション) | Applications | JWT (Bearer Token) | 100 req/min |
+| `GET` | `/api/v1/grants/list` | 助成金一覧 (`?category=PUBLIC|PRIVATE|DONATION_CF` などのフィルタリング、ソート、ページネーション) | Applications | JWT (Bearer Token) | 100 req/min |
 | `GET` | `/api/v1/grants/{id}/detail` | 助成金詳細 + AI適合判定結果 | Applications モーダル | JWT (Bearer Token) | 100 req/min |
 | `GET` | `/api/v1/grants/{id}/radar` | 4軸期待値レーダーチャートデータ | Applications モーダル | JWT (Bearer Token) | 100 req/min |
 | `GET` | `/api/v1/dashboard/summary` | ダッシュボードサマリー (Active grants数・総申請額等) | Dashboard | JWT (Bearer Token) | 120 req/min |

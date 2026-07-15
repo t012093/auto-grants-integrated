@@ -136,6 +136,7 @@ HTMLの `<body>` 要素（またはアプリのルート要素）に適用する
   --color-primary: #6366F1;     /* Electric Indigo */
   --color-accent: #10B981;      /* Neon Mint */
   --color-civic: #06B6D4;       /* Aqua Blue */
+  --color-alert: #EF4444;       /* Coral Red */
   --color-text: #F3F4F6;
   --color-text-muted: #9CA3AF;
   --blur-glass: blur(16px);
@@ -151,6 +152,7 @@ HTMLの `<body>` 要素（またはアプリのルート要素）に適用する
   --color-primary: #E07A5F;     /* Terracotta */
   --color-accent: #81B29A;      /* Sage Green */
   --color-civic: #F2CC8F;       /* Dusty Gold */
+  --color-alert: #D9383A;       /* Nordic Red */
   --color-text: #2D3142;
   --color-text-muted: #6C757D;
   --blur-glass: blur(12px);
