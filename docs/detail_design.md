@@ -1224,3 +1224,45 @@ class IntegratedImpactVisualizer:
 
         return sankey_data
 ```
+
+---
+
+## 13. モバイルPWA/アプリ統合およびセキュア鍵管理設計（シビック・ウォレット）
+
+### 13.1 モバイルアプリ統合方式と誘導フロー
+
+PC/タブレット向けにはレスポンシブなWeb画面を提供し、モバイル端末（iOS/Android）のブラウザからのアクセス時には、パフォーマンスとセキュリティに最適化された**PWA（Progressive Web App）**または**Capacitor**製ハイブリッドアプリへユーザーを誘導（移動）させます。
+
+1. **アプリ移行促進バナー (`MobileBanner`)**:
+   * モバイルブラウザでのアクセス検知時、PC Web版の上部に「より安全な住民証明とプッシュ通知の利用」を推奨するCosmic Glass調のフローティングバナーを表示。
+   * PWAインストーラーまたは各アプリストアへの誘導を実行。
+2. **マルチプラットフォーム・ビルド**:
+   * React 19 + Vite + TypeScriptの同一コードベースから、`@vite-pwa/plugin` を用いてモバイルPWAを自動生成、または `Capacitor` を用いてiOS/Androidアプリをビルド。
+
+### 13.2 セキュア鍵管理仕様（シビック・ウォレット）
+
+ユーザーが保有するW3C標準の分散型ID（DID）やゼロ知識証明（ZKP）に使用する秘密鍵は、ブラウザのXSS攻撃等のセキュリティリスクを回避するため、デバイス側のセキュアハードウェア領域（シビック・ウォレット）で管理します。
+
+* **秘密鍵の格納先**:
+  * **PWA版**: `IndexedDB` 上で暗号化して保存（一時的フォールバック）。
+  * **Capacitorアプリ版**: OS標準のハードウェア暗号鍵管理領域（**iOS: Secure Enclave / Android: Keystore**）に秘密鍵（Ed25519/Secp256k1）を格納。
+* **暗号処理**:
+  * Webブラウザ/アプリ内のWASM (`zk-SNARKs Prover`) による証明生成時、秘密鍵をメモリ上に直接展開させず、セキュアストレージプラグイン（`Capacitor Secure Storage`等）を経由してデバイスの生体認証（FaceID/TouchID）と連動した署名実行のみを要求する。
+
+### 13.3 FCM（Firebase Cloud Messaging）によるプッシュ通知フロー
+
+外部メッセージサービス（LINE/Slack/Email）への通知に加え、アプリ化によってOS標準のプッシュ通知をサポートします。
+
+```
+[バックエンド] (FastAPI/volunteer_workflow)
+      │
+      ▼ (通知イベント発生)
+[Firebase Cloud Messaging (FCM) API]
+      │
+      ├───────────────────────┐
+      ▼ (プッシュ通知送信)    ▼ (プッシュ通知送信)
+[iOS / Android (Capacitor)]  [モバイル PWA (Service Worker)]
+      │                       │
+      ▼                       ▼
+   「新しい助成金公募が開始されました」 / 「投票案件があります」
+```

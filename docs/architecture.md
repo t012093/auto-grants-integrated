@@ -98,33 +98,47 @@ graph TD
     subgraph External_Services ["外部連携サービス"]
         SupabaseAuth["Supabase Auth (JWT認証)"]
         StripeAPI["Stripe API (寄付決済)"]
+        FCM["Firebase Cloud Messaging<br>(OS標準プッシュ通知)"]
     end
 
     %% 6. フロントエンド (React 19)
     subgraph Client_Space ["フロントエンド (Vite / React 19 / TS)"]
-        Dashboard["ダッシュボード (Active Grants, タイムライン)"]
-        Sankey["予算フロー可視化 (Sankey + 資金監査)"]
-        Globe["グローバルマップ (Globe)"]
-        GovProUI["提案書エディタ (根拠付き自動生成)"]
-        CivicUI["協議・投票 (Quadratic Voting)"]
-        VolunteerUI["ボランティア (スキルマッチング・実績証明ウォレット)"]
-        
+        subgraph Web_Client ["PC用 Web画面"]
+            Dashboard["ダッシュボード (Active Grants, タイムライン)"]
+            Sankey["予算フロー可視化 (Sankey + 資金監査)"]
+            Globe["グローバルマップ (Globe)"]
+            GovProUI["提案書エディタ (根拠付き自動生成)"]
+            MobileBanner["アプリ移行促進バナー (モバイルWebアクセス時)"]
+        end
+
+        subgraph Mobile_App ["モバイル用アプリ (PWA / Capacitor)"]
+            CivicUI["協議・投票 (Quadratic Voting)"]
+            VolunteerUI["ボランティア (スキルマッチング)"]
+            WalletUI["シビック・ウォレット (秘密鍵・オープンバッジ管理)"]
+            ZKP_WASM["zk-SNARKs Prover (Client WASM)"]
+            
+            CivicUI --> ZKP_WASM
+            VolunteerUI --> WalletUI
+        end
+
         ClientAPI["API クライアント層<br/>(自動生成: Query / Zod / SDK)"]
-        ZKP_WASM["zk-SNARKs Prover (Client WASM)"]
-        
+        SecureStore["デバイスセキュアストレージ (Keystore / Secure Enclave)"]
+
         Dashboard --> ClientAPI
         Sankey --> ClientAPI
         Globe --> ClientAPI
         GovProUI --> ClientAPI
+        
         CivicUI --> ClientAPI
-        CivicUI --> ZKP_WASM
         VolunteerUI --> ClientAPI
+        WalletUI --> SecureStore
     end
 
     %% 外部連携 & 同期
     ClientAPI -->|HTTPS / JSON| Main
     Main --> SupabaseAuth
     Action_Domain --> StripeAPI
+    Security_Domain --> FCM
     ZKP_WASM -->|ZKP証明書送信| Security_Domain
     Info_Sources --> Collector
     DelibVote --> PG
