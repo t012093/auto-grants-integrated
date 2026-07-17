@@ -103,26 +103,37 @@ async def upsert_subsidies(self, raw_subsidies: list[dict]) -> tuple[int, int]:
 class PrivateGrantFetcher:
     """
     民間助成情報ポータルまたは特定の助成財団のWebページ・RSSをクローリングし、
-    LLMによる構造化を経て grants テーブルに category='PRIVATE' として保存する。
+    DOMプロファイルおよびPlaywrightを用いて、LLM構造化を経て grants テーブルに category='PRIVATE' として保存する。
+    クオリティゲートおよびLLM自己修復（Self-Healing）機構を備える。
     """
-    def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient):
+    def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient, playwright_client: PlaywrightClient):
         self.db = db_client
         self.llm = llm_client
-        self.source_name = "private_grant_portal_x"
-        self.url = "https://example-private-grants.org/list.html"
+        self.pw = playwright_client
 
-    async def run(self) -> CollectorResult:
-        # 1. ページ取得
-        html = await self.fetch_html()
+    async def run(self, source_id: str) -> CollectorResult:
+        # 1. 登録されているDOMプロファイル（CSSセレクタ定義）の取得
+        profile = await self.db.fetch_one("SELECT * FROM grant_source_profiles WHERE source_id = :id AND active = true", {"id": source_id})
         
-        # 2. クレンジング
-        clean_text = self.clean_html(html)
+        # 2. Playwrightを用いたDOMツリー巡回とコンテンツ抽出
+        # profile 内のセレクタ (list_selector, detail_selector, etc.) に基づく
+        pages_content = await self.pw.crawl_pages(profile)
         
         # 3. LLMを用いた民間助成金情報の構造化抽出
         # ※民間特有の項目（財団の設立趣旨、適合する特定NPO活動領域など）を抽出
-        raw_grants = await self.extract_private_grants_via_llm(clean_text)
+        raw_grants = await self.extract_private_grants_via_llm(pages_content)
         
-        # 4. 重複排除 (Upsert) 処理
+        # 4. クオリティゲート（Quality Gate）による網羅性チェック
+        # 必須項目（タイトル、提供団体、締切、URL）が埋まっているか、Coverage Rate (埋まり率) >= 0.95 かを評価
+        is_valid, coverage_rate = self.evaluate_quality_gate(raw_grants)
+        
+        if not is_valid:
+            # クオリティゲート違反の場合：自己修復 (Self-Healing) をトリガー
+            # LLMが現在のHTML木構造と期待されるスキーマの乖離を分析し、DOMプロファイルを修正
+            await self.trigger_self_healing_repair(source_id, pages_content)
+            return CollectorResult(status="needs_user_input", items_found=0, message="Quality gate failed. Self-healing triggered.")
+            
+        # 5. 重複排除 (Upsert) 処理
         new_count, updated_count = await self.upsert_private_grants(raw_grants)
         
         return CollectorResult(status="success", items_found=new_count, message=f"Added {new_count}, updated {updated_count}")

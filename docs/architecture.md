@@ -10,106 +10,88 @@
 
 ```mermaid
 graph TD
-    subgraph GrantSources["助成金・資金データソース"]
-        DS1["jGrants API<br>(経済産業省)"]
-        DS2["自治体 RSS/新着ページ<br>(富山市・富山県)"]
-        DS3["こども家庭庁<br>(PDF/Excel)"]
-        DS4["ミラサポplus"]
-        DS5["市民・企業ドナー<br>(クラファン寄付)"]
-        DS6["民間助成金ポータル<br>(助成財団HP/RSS)"]
+    %% 1. 情報源 (Information Sources)
+    subgraph Info_Sources ["情報源 (Information Sources)"]
+        GovPlan["行政文書 / 総合計画 (PDF/Word)"]
+        GovRFP["公募仕様書 (RFP)"]
+        JFC_API["助成金ナビ (JFC API)"]
+        WebDOM["民間財団Webサイト (HTML/DOM)"]
+        LocalRSS["富山ローカルRSS / 自治体HP"]
+        DelibVote["市民合意・投票データ (Quadratic Voting)"]
+        NpoAsset["団体アセット (活動実績・プロフィール)"]
     end
 
-    subgraph BudgetSources["予算・財政データソース"]
-        BS1["財務省/厚労省 予算書 (PDF/Excel)"]
-        BS2["自治体 財務状況CSV (zaisei-radar)"]
-        BS3["IMF DOTS / World Bank API"]
+    %% 2. 収集・正規化パイプライン (Ingest & Normalization)
+    subgraph Ingest_Pipeline ["インジェスト・正規化パイプライン (uv / Python)"]
+        Collector["コレクター群 (jGrants API, Tree Crawler, Playwright, RSS Watcher)"]
+        Normalizer["Document Normalizer<br/>(PDF/Office/HTML -> Text)"]
+        QGate["クオリティゲート (Coverage >= 0.95)"]
+        SelfHealing["LLM 自己修復 (learn_profile / repair_extract)"]
+        
+        Collector --> Normalizer
+        Normalizer --> QGate
+        QGate -- 失敗 --> SelfHealing
+        SelfHealing --> Collector
     end
 
-    subgraph Collectors["収集・同期レイヤー"]
-        CL1["jGrants/RSS Collector"]
-        CL2["Page-Diff Collector (LLM構造化)"]
-        CL3["Cascade Tracker (交付金リンク追跡)"]
-        CL4["Budget & Zaisei Fetcher"]
-        CL5["Supabase Realtime Sync (クラファン/応募)"]
-        CL6["Private Grant Fetcher"]
+    %% 3. データストア & ナレッジ化
+    subgraph Data_Store_Knowledge ["データストア & ナレッジ化"]
+        PG[("PostgreSQL 15 + pgvector")]
+        ModalGPU["Modal GPU Serverless<br/>(Qwen3-Embedding / Reranker)"]
+        GraphRAG["GraphRAG (政策・施策構造化)"]
+        
+        QGate -- 合格/登録 --> PG
+        QGate -- 合格/構造化 --> GraphRAG
+        GraphRAG --> PG
+        PG <--> ModalGPU
     end
 
-    subgraph Processing["処理・エージェントレイヤー"]
-        PR1["正規化・構造化 (重複排除)"]
-        PR2["GraphRAG (総合計画の知識グラフ化)"]
-        PR3["GovPro Agent (マルチエージェント協働)"]
-        PR4["Prosocial Algorithm (市民合意率測定)"]
-    end
-
-    subgraph ModalAI["AI / Embedding レイヤー (Modal GPU)"]
-        AI1["Qwen3-Embedding-8B<br>(4096dim)"]
-        AI2["BgeReranker v2-m3<br>(Cross-Encoder)"]
-    end
-
-    subgraph DataLayer["データレイヤー"]
-        DB["PostgreSQL (Supabase)"]
-        DB_V["pgvector (HNSW Index: 4096次元)"]
-        DB_R["Supabase Realtime Engine"]
-    end
-
-    subgraph AppLayer["アプリケーションレイヤー"]
-        API["FastAPI Backend (Python 3.11+)"]
-        MCP["MCP Gateway (67+ tools)"]
-    end
-
-    subgraph FrontendLayer["フロントエンド (React 19 + Vite)"]
-        subgraph SidebarNav["左固定サイドバー (Cosmic Glass)"]
-            SB_FND["資金と財政<br>(Home/MoneyFlow/Applications/Crowdfunding)"]
-            SB_GOV["自治体提案<br>(Docs/ProposalGen/GraphRAG)"]
-            SB_CIV["市民参加と実行<br>(Deliberation/Projects/Organization)"]
+    %% 4. 統合バックエンド (FastAPI)
+    subgraph Backend_Space ["統合バックエンド (FastAPI / auto-grantsv2 ベース)"]
+        Main["FastAPI Entry (main.py)"]
+        
+        subgraph Subsidies_Domain ["助成金ドメイン"]
+            S_Router["routes.py (検索・一覧)"]
+            S_Rep["db.py (助成金リポジトリ)"]
         end
+
+        subgraph GovPro_Domain ["提案書生成・シミュレーションドメイン"]
+            P_Gen["proposal_generator.py (ProposalGenerator)"]
+            P_Sim["採択シミュレーター (Simulate API)"]
+        end
+        
+        Main --> S_Router
+        Main --> P_Gen
+        Main --> P_Sim
+        
+        S_Router --> S_Rep
+        S_Rep --> PG
+        
+        P_Gen -->|団体アセット取得| PG
+        P_Gen -->|政策適合エビデンス検索| GraphRAG
+        P_Sim -->|RFP適合度判定| PG
     end
 
-    subgraph Interface["インターフェース"]
-        IF1["Claude Desktop / Code (MCP)"]
-        IF2["Slack / LINE / Email 通知"]
-        IF3["Web App (Cosmic Glass UI)"]
+    %% 5. フロントエンド (React 19)
+    subgraph Client_Space ["フロントエンド (Vite / React 19 / TS)"]
+        Dashboard["ダッシュボード (Active Grants, タイムライン)"]
+        Sankey["予算フロー可視化 (Sankey)"]
+        Globe["グローバルマップ (Globe)"]
+        GovProUI["提案書エディタ (根拠付き自動生成)"]
+        
+        ClientAPI["API クライアント層<br/>(自動生成: Query / Zod / SDK)"]
+        
+        Dashboard --> ClientAPI
+        Sankey --> ClientAPI
+        Globe --> ClientAPI
+        GovProUI --> ClientAPI
     end
 
-    DS1 --> CL1
-    DS2 --> CL2
-    DS3 --> CL3
-    DS4 --> CL1
-    DS5 --> CL5
-    DS6 --> CL6
-
-    BS1 --> CL4
-    BS2 --> CL4
-    BS3 --> CL4
-
-    CL1 --> PR1
-    CL2 --> PR1
-    CL3 --> PR1
-    CL4 --> PR1
-    CL5 --> DB
-    CL6 --> PR1
-
-    PR1 --> AI1
-    AI1 --> DB_V
-    PR2 --> DB_V
-    PR3 --> API
-    PR4 --> DB
-
-    DB --> API
-    DB_V --> AI2
-    DB_R --> SB_FND
-    DB_R --> SB_CIV
-
-    API --> MCP
-    API --> SidebarNav
-
-    MCP --> IF1
-    API --> IF2
-    SidebarNav --> IF3
-
-    style ModalAI fill:#1a1a2e,stroke:#6366f1,color:#fff
-    style DataLayer fill:#0f3460,stroke:#06b6d4,color:#fff
-    style FrontendLayer fill:#090d16,stroke:#10b981,color:#fff
+    %% 外部連携 & 同期
+    ClientAPI -->|HTTPS / JSON| Main
+    Info_Sources --> Collector
+    DelibVote --> PG
+    NpoAsset --> PG
 ```
 
 ---
