@@ -36,8 +36,8 @@ graph TD
 
     %% 3. データストア & ナレッジ化
     subgraph Data_Store_Knowledge ["データストア & ナレッジ化"]
-        PG[("PostgreSQL 15 + pgvector")]
-        ModalGPU["Modal GPU Serverless<br/>(Qwen3-Embedding / Reranker)"]
+        PG[("PostgreSQL 15 + pgvector<br>(助成金・予算・投票・ボランティア・ZKPデータ)")]
+        ModalGPU["Modal GPU Serverless<br/>(Qwen3-Embedding / Reranker / スキルマッチング)"]
         GraphRAG["GraphRAG (政策・施策構造化)"]
         
         QGate -- 合格/登録 --> PG
@@ -50,7 +50,7 @@ graph TD
     subgraph Backend_Space ["統合バックエンド (FastAPI / auto-grantsv2 ベース)"]
         Main["FastAPI Entry (main.py)"]
         
-        subgraph Subsidies_Domain ["助成金ドメイン"]
+        subgraph Subsidies_Domain ["助成金・予算ドメイン"]
             S_Router["routes.py (検索・一覧)"]
             S_Rep["db.py (助成金リポジトリ)"]
         end
@@ -59,10 +59,28 @@ graph TD
             P_Gen["proposal_generator.py (ProposalGenerator)"]
             P_Sim["採択シミュレーター (Simulate API)"]
         end
+
+        subgraph Plurality_Domain ["市民参加 (Plurality) ドメイン"]
+            P_Vote["quadratic_voting.py (二次投票処理)"]
+            P_Thread["deliberation.py (合意形成スレッド)"]
+        end
+
+        subgraph Action_Domain ["実行・資金調達ドメイン"]
+            A_Vol["volunteer_service.py (スキルマッチング)"]
+            A_CF["crowdfunding.py (クラファン・資金監査)"]
+        end
+
+        subgraph Security_Domain ["認証・ZKP・DID ドメイン"]
+            Sec_Auth["did_resolver.py (DID/VC検証・バッジ発行)"]
+            Sec_ZKP["zk_proof_verifier.py (zk-SNARKs検証)"]
+        end
         
         Main --> S_Router
         Main --> P_Gen
         Main --> P_Sim
+        Main --> Plurality_Domain
+        Main --> Action_Domain
+        Main --> Security_Domain
         
         S_Router --> S_Rep
         S_Rep --> PG
@@ -70,25 +88,44 @@ graph TD
         P_Gen -->|団体アセット取得| PG
         P_Gen -->|政策適合エビデンス検索| GraphRAG
         P_Sim -->|RFP適合度判定| PG
+        
+        Plurality_Domain --> PG
+        Action_Domain --> PG
+        Security_Domain --> PG
     end
 
-    %% 5. フロントエンド (React 19)
+    %% 5. 外部連携サービス
+    subgraph External_Services ["外部連携サービス"]
+        SupabaseAuth["Supabase Auth (JWT認証)"]
+        StripeAPI["Stripe API (寄付決済)"]
+    end
+
+    %% 6. フロントエンド (React 19)
     subgraph Client_Space ["フロントエンド (Vite / React 19 / TS)"]
         Dashboard["ダッシュボード (Active Grants, タイムライン)"]
-        Sankey["予算フロー可視化 (Sankey)"]
+        Sankey["予算フロー可視化 (Sankey + 資金監査)"]
         Globe["グローバルマップ (Globe)"]
         GovProUI["提案書エディタ (根拠付き自動生成)"]
+        CivicUI["協議・投票 (Quadratic Voting)"]
+        VolunteerUI["ボランティア (スキルマッチング・実績証明ウォレット)"]
         
         ClientAPI["API クライアント層<br/>(自動生成: Query / Zod / SDK)"]
+        ZKP_WASM["zk-SNARKs Prover (Client WASM)"]
         
         Dashboard --> ClientAPI
         Sankey --> ClientAPI
         Globe --> ClientAPI
         GovProUI --> ClientAPI
+        CivicUI --> ClientAPI
+        CivicUI --> ZKP_WASM
+        VolunteerUI --> ClientAPI
     end
 
     %% 外部連携 & 同期
     ClientAPI -->|HTTPS / JSON| Main
+    Main --> SupabaseAuth
+    Action_Domain --> StripeAPI
+    ZKP_WASM -->|ZKP証明書送信| Security_Domain
     Info_Sources --> Collector
     DelibVote --> PG
     NpoAsset --> PG
