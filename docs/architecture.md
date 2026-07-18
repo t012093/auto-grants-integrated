@@ -37,6 +37,7 @@ graph TD
     %% 3. データストア & ナレッジ化
     subgraph Data_Store_Knowledge ["データストア & ナレッジ化"]
         PG[("PostgreSQL 15 + pgvector<br>(助成金・予算・投票・ボランティア・ZKPデータ)")]
+        Realtime["Supabase Realtime Engine<br>(クラファン決済・応募の即時通知)"]
         ModalGPU["Modal GPU Serverless<br/>(Qwen3-Embedding / Reranker / スキルマッチング)"]
         GraphRAG["GraphRAG (政策・施策構造化)"]
         
@@ -44,6 +45,7 @@ graph TD
         QGate -- 合格/構造化 --> GraphRAG
         GraphRAG --> PG
         PG <--> ModalGPU
+        PG --> Realtime
     end
 
     %% 4. 統合バックエンド (FastAPI)
@@ -74,6 +76,8 @@ graph TD
             Sec_Auth["did_resolver.py (DID/VC検証・バッジ発行)"]
             Sec_ZKP["zk_proof_verifier.py (zk-SNARKs検証)"]
         end
+
+        MCP_GW["MCP Gateway (Stdio/HTTP)<br>(67+ LLMツール公開)"]
         
         Main --> S_Router
         Main --> P_Gen
@@ -81,6 +85,7 @@ graph TD
         Main --> Plurality_Domain
         Main --> Action_Domain
         Main --> Security_Domain
+        Main --> MCP_GW
         
         S_Router --> S_Rep
         S_Rep --> PG
@@ -136,6 +141,8 @@ graph TD
 
     %% 外部連携 & 同期
     ClientAPI -->|HTTPS / JSON| Main
+    Realtime -->|WebSocket| ClientAPI
+    Dashboard -.->|非同期プリウォーム| ModalGPU
     Main --> SupabaseAuth
     Action_Domain --> StripeAPI
     Security_Domain --> FCM
@@ -149,18 +156,14 @@ graph TD
 
 ## 2. レイヤー構成の設計方針
 
-| レイヤー | 役割 | 統合・実装方針 |
+| レイヤー (図中サブグラフ名) | 役割 | 統合・実装方針 |
 |---|---|---|
-| **GrantSources** | 助成金および直接的資金調達元 | 従来の公募情報に加え、市民や企業からのクラウドファンディングの寄付フロー（リアルタイムトランザクション）を統合。 |
-| **BudgetSources** | 国・自治体の財務情報 | 財務省等の予算PDFのほか、`zaisei-radar`が使用する自治体の財務データCSVをインポート。 |
-| **Collectors** | データ収集・同期 | 日次/週次バッチスクリプトに加え、ボランティア応募やクラファン決済時のSupabase Realtimeリスナーによる即時反映。 |
-| **Processing** | データ構造化・エージェント | `BeautifulSoup` + `LLM` によるテキスト抽出。自治体基本計画のGraphRAGコミュニティ生成。プロソーシャル（市民合意）指標の算出。 |
-| **AI/Embedding** | セマンティック処理 | Modal GPU上のQwen3 (4096次元) で統一。BgeRerankerによる高精度リランキング。 |
-| **Security & Privacy** | 信頼・プライバシー保護 | W3C規格の **DID（分散型ID）** を用いた自己主権型認証、および **zk-SNARKs** を用いた個人情報不要の実績・住民属性証明。 |
-| **Data** | 永続化とリアルタイム連携 | PostgreSQL (Supabase) 上に、助成金、予算フロー、クラファン、プロジェクト（ボランティア）、市民投票、団体アセット、およびZKP検証用資格（VC）の全テーブルを一元化。Row Level Security (RLS) によるセキュリティ確保。 |
-| **Application** | ロジック・インターフェース | FastAPIによるAIエージェントのオーケストレーション、ZKP検証エンジン、外部接続用MCPサーバー。 |
-| **Frontend** | ユーザーインターフェース | React 19 + Vite。「Cosmic Glass」デザインシステムを採用した、左固定多階層ナビゲーションによるSPA。 |
-| **Interface** | マルチチャネルアクセス | Web UI、Slack/LINE/Emailによる期日・応募通知、Claudeによる自然言語MCP操作。 |
+| **Info_Sources** (情報源) | 助成金・予算・行政文書・市民合意の原データ | jGrants API、民間財団Web/DOM、自治体RSS、行政文書PDF/Word、RFP、市民投票データ、団体実績を包含。 |
+| **Ingest_Pipeline** (インジェスト・正規化) | 収集・正規化・品質検証 | コレクター群（jGrants API / Tree Crawler / Playwright / RSS Watcher）→ Document Normalizer → クオリティゲート（Coverage ≧ 0.95）。失敗時は LLM 自己修復ループで自動復旧。 |
+| **Data_Store_Knowledge** (データストア & ナレッジ化) | 永続化・ベクトル化・構造化・リアルタイム配信 | PostgreSQL 15 + pgvector に全テーブルを一元管理。GraphRAG で政策・施策を知識グラフ化。Supabase Realtime Engine でクラファン決済・ボランティア応募を即時にフロントへ配信。Modal GPU (Qwen3-Embedding / BgeReranker) でセマンティック検索・スキルマッチングを実行。RLS によるセキュリティ確保。 |
+| **Backend_Space** (統合バックエンド) | ドメインロジック・API・MCP | FastAPI + uv。助成金・予算 / 提案書生成・シミュレーション / 市民参加 (Plurality) / 実行・資金調達 / 認証・ZKP・DID の5ドメインに分割。**MCP Gateway (Stdio/HTTP)** で全APIを67+のLLMツールとして公開し、Claude等からの自然言語操作を実現。 |
+| **External_Services** (外部連携) | 認証・決済・プッシュ通知 | Supabase Auth (JWT)、Stripe API (寄付決済)、Firebase Cloud Messaging (OS標準プッシュ通知)。 |
+| **Client_Space** (フロントエンド) | PC Web + モバイルアプリ | React 19 + Vite + TypeScript。PC用 Web画面（ダッシュボード、Sankey、Globe、提案書エディタ）と、モバイル用アプリ (PWA / Capacitor: 協議・投票、ボランティア、シビック・ウォレット、zk-SNARKs Prover WASM) に論理分割。Hey API による型・SDK・Zod の完全自動生成。 |
 
 ---
 
