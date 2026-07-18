@@ -1,6 +1,6 @@
 # 統合アーキテクチャ設計 & 実装計画 (最新ベストプラクティス対応版)
 
-`subsidy-radar` の稼働しているバックエンド資産と、`auto-grants-integrated` のフロントエンド構想を、2026年現在の最新ベストプラクティス（**FastAPI ドメイン駆動設計 + uv + React 19 + Hey API フル自動生成**）の構成で統合します。
+`subsidy-radar` の稼働しているバックエンド資産と、`auto-grants-integrated` のフロントエンド構想を、2026年現在の最新ベストプラクティス（**FastAPI ドメイン駆動設計 + uv + React 19 + Hey API フル自動生成 + turbovec 軽量類似検索 + オンデマンドOSSビジュアルRAG**）の構成で統合します。
 
 ---
 
@@ -12,6 +12,10 @@
 
 ### B. フロントエンド: Hey API によるフル自動生成
 型定義だけでなく、データフェッチ、キャッシュ、クライアントバリデーションまでのボイラープレートコードを一切手書きしない「スキーマ駆動」を徹底します。
+
+### C. ベクトル検索の軽量化 ＆ オンデマンドOSSビジュアルRAGの採用
+大規模なベクトルデータベース（pgvector など）へのクエリ負荷とメモリ消費を最小限に抑えるため、Google Research の **TurboQuant** アルゴリズムに基づく Rust 製ベクトル検索エンジン **`turbovec`** を採用し、インメモリ類似度検索キャッシュとして機能させます。
+さらに、レイアウト崩れや表の誤読による情報損失をゼロにするため、検索時には「テキスト」で高速かつ安価にページ特定を行い、回答生成時のみ対象ページを一時画像化してプライベート環境の **「OSS Vision LLM」** に入力する **「オンデマンドOSSビジュアルRAG」** アプローチを採用します。これにより、外部商用APIへのデータ流出を防ぎつつ、インフラコストを最小化します。
 
 ```mermaid
 graph TD
@@ -26,17 +30,19 @@ graph TD
     %% 2. 収集・解析
     subgraph Ingest_Pipeline ["データ収集・解析 (uv / Python)"]
         Collector["Collector (Playwright/RSS/APIs)"]
-        Normalizer["Document Normalizer"]
+        Normalizer["Document Normalizer (Markdown抽出)"]
+        DupCheck["turbovec (インメモリ重複排除)"]
         QGate["Quality Gate (Coverage >= 0.95)"]
         SelfHealing["LLM 自己修復ループ"]
         
-        Collector --> Normalizer --> QGate
+        Collector --> Normalizer --> DupCheck --> QGate
         QGate -- 失敗 --> SelfHealing --> Collector
     end
 
     %% 3. GCPデータストア & ナレッジ
     subgraph GCP_Data_Space ["GCP データストア & ナレッジ基盤"]
         PG[("PostgreSQL 15 + pgvector (ag-postgres)")]
+        DocStorage[("GCS / Supabase Storage (安価なPDF書庫)")]
         Realtime["Supabase Realtime Engine (通知/同期)"]
         ModalGPU["Modal GPU Serverless (Reranker/Embed)"]
         GraphRAG["GraphRAG (政策ナレッジグラフ)"]
@@ -52,6 +58,9 @@ graph TD
         Gov_Domain["提案書・採択シミュレーション"]
         Plurality_Domain["市民参加・投票 (plurality)"]
         Sec_Domain["DID/VC・ZKP検証 (security)"]
+        
+        T_Cache["turbovec (インメモリ検索キャッシュ)"]
+        PDFRenderer["PDF Renderer (オンデマンド画像化モジュール)"]
         SchemaExporter["Schema Exporter (export_openapi.py)"]
         MCP_GW["MCP Gateway (67+ LLMツール)"]
         
@@ -62,7 +71,11 @@ graph TD
         Main --> MCP_GW
         Main --> SchemaExporter
         
-        S_Domain --> PG
+        S_Domain --> T_Cache
+        T_Cache <-->|高速ハイブリッド検索| PG
+        S_Domain -->|ページ番号指定| PDFRenderer
+        PDFRenderer <-->|該当ページのみロード| DocStorage
+        
         Gov_Domain -->|団体アセット取得| PG
         Gov_Domain -->|エビデンス検索| GraphRAG
         Plurality_Domain --> PG
@@ -105,7 +118,8 @@ graph TD
     DelibVote --> PG
     NpoAsset --> PG
     
-    QGate -- 登録 --> PG
+    QGate -- テキスト/ベクトル登録 --> PG
+    QGate -- 原本PDF保存 --> DocStorage
     QGate -- 構造化 --> GraphRAG
     
     %% API連携
@@ -117,12 +131,13 @@ graph TD
     Realtime -->|WebSocket| Web_ClientAPI
     Realtime -->|WebSocket| Mob_ClientAPI
     
-    ZKP_WASM -->|ZKP証明書送信| Sec_Domain
+    ZKP_WASM -->|証明データ| Mob_ClientAPI
     WalletUI -.->|did:key署名| CivicUI
     
     %% 外部サービス
     Main --> SupabaseAuth["Supabase Auth"]
     S_Domain --> Stripe["Stripe API (決済)"]
+    PDFRenderer -->|レンダリング画像ストリーム| VLM["OSS Vision LLM (Qwen2.5-VL / Modal)"]
 ```
 
 ---
@@ -149,14 +164,16 @@ auto-grants-integrated/
 │   │       ├── main.py          # FastAPI エントリーポイント
 │   │       ├── core/            # 共通設定、セキュリティ、ロガー
 │   │       │   ├── config.py
-│   │       │   └── logger.py
+│   │       │   ├── logger.py
+│   │       │   └── pdf_renderer.py # PDFオンデマンド画像レンダラー
 │   │       └── domains/         # 機能ドメイン別のカプセル化
 │   │           └── subsidies/   # 助成金関連
 │   │               ├── __init__.py
 │   │               ├── router.py   # API ルート定義
 │   │               ├── models.py   # Pydantic スキーマ
 │   │               ├── schema.py   # PostgreSQL DDL
-│   │               └── db.py       # リポジトリ層 (CRUD)
+│   │               ├── db.py       # リポジトリ層 (CRUD)
+│   │               └── search.py   # turbovec を用いた高速類似検索
 │   └── tests/
 │       ├── conftest.py          # テスト用DB起動ヘルパー
 │       └── domains/
@@ -312,7 +329,44 @@ export const SubsidyManager = () => {
 
 ---
 
-## 7. 検証計画 (Verification Plan)
+## 7. 軽量・低コストなビジュアルRAG（turbovec ＋ オンデマンド画像化）の採用設計
+
+インフラ負荷（メモリ消費・DBへのクエリ負荷）の軽減、および複雑な表やレイアウトの解釈精度（無損失）を両立するため、テキスト検索とオンデマンド画像化を組み合わせたハイブリッド方式を採用します。
+
+### A. データ収集時のインメモリ重複排除 (DupCheck)
+*   **配置**: インジェスト・解析パイプライン (`backend/src/civic_grants/domains/subsidies/collector`)
+*   **用途**: クロールした文書がすでに登録済みデータと類似していないかを、DBを圧迫せずにパイプライン内のメモリ上で高速に重複判定します。
+*   **保管**: 解析対象の原本PDFファイルは、安価なオブジェクトストレージ `DocStorage` (GCS / Supabase Storage など) にそのまま保存されます。
+
+### A-2. DocStorage のアクセスパターンとキャッシュ戦略
+*   **ストレージ選定基準**: 初期フェーズでは Supabase Storage（S3互換、既存インフラとの親和性）を採用し、月間ストレージ量が 100GB を超過した段階で GCS への移行を検討。
+*   **ローカルキャッシュ**: PDF Renderer がアクセスする際、直近リクエストされたPDFファイルをバックエンドのローカルディスク（tmpfs / `/tmp`）に LRU キャッシュ（上限 512MB）として一時保持し、同一PDFへの連続アクセス時のネットワークラウンドトリップを回避。
+*   **サイズ制限**: 1ファイルあたり最大 50MB。超過する場合はインジェスト時に分割処理を行う。
+
+### B. バックエンドのインメモリ検索キャッシュ (T_Cache)
+*   **配置**: 助成金ドメイン API (`backend/src/civic_grants/domains/subsidies/`)
+*   **用途**: 直近の助成金データやアクセス頻度の高いベクトルデータをメモリ上に `turbovec` インデックスとしてロードし、1次検索（テキストおよびIDでの高速絞り込み）を行います。
+*   **フォールバック戦略**: turbovec インデックスの構築失敗時やメモリ不足時には、pgvector への直接クエリにフォールバックする。切り替えは `search.py` 内の try/except で自動制御。
+*   **ベンチマーク目標値**: Recall@10 ≥ 0.95、レイテンシ p99 ≤ 5ms（助成金データ 10,000件規模）。
+*   **メモリ見積もり**: 384次元ベクトル × 10,000件 ≈ 約 15MB（量子化適用時）。上限 256MB を超過した場合は古いインデックスを自動 evict。
+
+### C. オンデマンド画像レンダリング (PDF Renderer) のフロー
+*   **配置**: バックエンドの共通コアモジュール (`backend/src/civic_grants/core/pdf_renderer.py`)
+*   **ライブラリ選定**: **PyMuPDF (`fitz`)** を採用。poppler ベースの `pdf2image` と比較して、外部バイナリ依存がなく（pure Python + C拡張）、単一ページのレンダリングで約 3〜10 倍高速（150dpi で 10〜50ms/ページ）。Docker イメージサイズへの影響も最小限。
+*   **用途**: 
+    1. 検索APIが `turbovec` からドキュメントIDとヒットした「ページ番号」を特定。
+    2. `PDF Renderer` は `DocStorage`（またはローカルLRUキャッシュ）から該当PDFファイルをロードし、指定された**対象ページのみをメモリ上で一時的に画像（PNG/WebP）にレンダリング**。
+    3. この一時画像データを、プロンプトテキストとともにプライベートホストした **OSS Vision LLM (Qwen2.5-VL 等のオープンソースモデル)** へ直接ストリーム送信し、回答を生成させます。
+*   **効果**: 画像のベクトル情報をベクトルDBのメモリ（RAM）に載せる必要がなくなり、画像ファイル自体の事前蓄積も不要に。ストレージコストとDBの維持費を最小限（数分の一以下）に抑えつつ、最高精度の視覚的RAGを実現します。
+
+### D. 完全プライベート化（OSS構成）の選択肢
+*   **モデル選定**: ドキュメントや表・グラフの視覚理解力においてオープンソース最高峰である **`Qwen2.5-VL` (7B / 72B)** を採用。
+*   **実行環境**: すでにアーキテクチャに含まれる `Modal GPU Serverless` にホスト。
+*   **メリット**: 行政文書などの機密データを外部の商用API（OpenAIやGoogle）に一切送信せず、自社のインフラ内部だけで完結するセキュアな構成と、GPU稼働時間のみの極めて低コストな運用を実現します。
+
+---
+
+## 8. 検証計画 (Verification Plan)
 
 ### バックエンドの検証
 *   `backend` ディレクトリで `uv run pytest` を実行し、既存テストが正常にパスすることを確認。
@@ -324,6 +378,11 @@ export const SubsidyManager = () => {
 ### フロントエンドのビルド検証
 *   `pnpm dev` で開発サーバーが起動すること、TypeScript のエラーがないこと、ビルド (`pnpm build`) が正常に通ることを確認。
 
+### turbovec 類似度検索の動作検証
+*   `backend` ディレクトリで、`turbovec` を用いたインメモリ重複判定およびフィルタリング検索のユニットテストを実行し、意図した Recall レベルおよび動作速度が得られるか検証。
+
+### PDF Renderer (オンデマンド画像化) の検証
+*   指定したPDFの特定ページが、サーバー負荷をかけずに高速（ミリ秒単位）で画像データ（バイナリストリーム）にレンダリングされ、外部 VLM API に正常に送信できるかを単体テストで検証。
+
 ### GCPデプロイの検証
 *   デプロイ後に動作確認用のヘルスチェックエンドポイント（`/health` または `/docs`）にアクセスし、正常に応答が返ることを確認。
-
