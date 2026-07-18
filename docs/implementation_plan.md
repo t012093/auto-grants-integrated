@@ -384,8 +384,11 @@ app = FastAPI(title="Civic Grants API", version="1.0.0")
 # CORS 設定
 origins = [
     "http://localhost:5173", # ローカル開発用 React
-    os.environ.get("FRONTEND_URL", "https://civic-grants.example.com") # 本番/検証環境用
 ]
+# 本番/検証環境用: FRONTEND_URL が設定されている場合のみ追加
+frontend_url = os.environ.get("FRONTEND_URL")
+if frontend_url:
+    origins.append(frontend_url)
 
 app.add_middleware(
     CORSMiddleware,
@@ -448,7 +451,7 @@ dev-frontend:
 
 dev:
 	@echo "Starting development servers..."
-	pnpm --parallel --filter "./frontend" --filter "./backend" dev
+	$(MAKE) -j2 dev-backend dev-frontend
 
 api-sync:
 	@echo "Syncing API contract..."

@@ -2,6 +2,7 @@
   "name": "auto-grants-integrated",
   "version": "1.0.0",
   "private": true,
+  "description": "仮置きルート設定。frontend/ 初期化後に削除予定 (implementation_plan.md §2.1 参照)",
   "dependencies": {
     "@nivo/sankey": "^0.99.0",
     "react-globe.gl": "^2.38.0"

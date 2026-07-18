@@ -626,6 +626,9 @@ class RewardCreate(BaseModel):
     description: str
     min_amount: int = Field(ge=0)
     available_count: int | None = None
+
+# NOTE: Forward Reference を使用しているため、ファイル末尾で
+# CampaignCreate.model_rebuild() を呼び出すこと (Pydantic v2 必須)
 ```
 
 **Response** `201 Created`:
@@ -651,6 +654,9 @@ class RewardResponse(BaseModel):
     description: str
     min_amount: int
     available_count: int | None
+
+# NOTE: Forward Reference を使用しているため、ファイル末尾で
+# CampaignResponse.model_rebuild() を呼び出すこと (Pydantic v2 必須)
 ```
 
 ---

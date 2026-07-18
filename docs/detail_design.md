@@ -451,6 +451,9 @@ sequenceDiagram
 
 ```python
 # backend/src/civic_grants/core/auth.py
+# NOTE: JWT 検証ライブラリとして python-jose[cryptography] を使用
+#   pip install python-jose[cryptography]
+#   (PyJWT ではなく python-jose を採用 — JWKSの RS256 検証を簡潔に記述可能)
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
@@ -1469,7 +1472,7 @@ limiter = Limiter(key_func=get_remote_address)
 # API メインに追加して RateLimitExceeded を ErrorResponse 429 にマッピングする
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(
-        status_code=status.HTTP_429_TOO_MANY_CLIENTS,
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         content=ErrorResponse(
             error="RATE_LIMITED",
             message=f"Rate limit exceeded: {exc.detail}. Please try again later."
