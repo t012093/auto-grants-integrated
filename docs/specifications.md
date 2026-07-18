@@ -364,6 +364,7 @@ CREATE TABLE public.crowdfunding_donations (
   donor_name TEXT NOT NULL,
   amount INTEGER NOT NULL CHECK (amount > 0),
   message TEXT,
+  stripe_session_id TEXT UNIQUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );
 
@@ -419,7 +420,8 @@ CREATE OR REPLACE FUNCTION public.donate_to_campaign(
   p_donor_name TEXT,
   p_amount INTEGER,
   p_message TEXT,
-  p_donor_id UUID
+  p_donor_id UUID,
+  p_stripe_session_id TEXT
 )
 RETURNS JSONB AS $$
 DECLARE
@@ -427,8 +429,8 @@ DECLARE
   v_campaign_record RECORD;
 BEGIN
   -- 寄付レコードの挿入
-  INSERT INTO public.crowdfunding_donations (campaign_id, donor_user_id, donor_name, amount, message)
-  VALUES (p_campaign_id, p_donor_id, p_donor_name, p_amount, p_message)
+  INSERT INTO public.crowdfunding_donations (campaign_id, donor_user_id, donor_name, amount, message, stripe_session_id)
+  VALUES (p_campaign_id, p_donor_id, p_donor_name, p_amount, p_message, p_stripe_session_id)
   RETURNING id INTO v_donation_id;
 
   -- キャンペーン金額・人数の更新
