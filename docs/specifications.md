@@ -298,6 +298,7 @@ CREATE TABLE public.deliberation_topics (
   description TEXT NOT NULL,
   created_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
   status TEXT NOT NULL DEFAULT 'OPEN', -- 'OPEN', 'RESOLVED', 'ARCHIVED'
+  voting_end_date TIMESTAMPTZ,         -- 投票締切日 (NULL = 無期限)
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -307,7 +308,7 @@ CREATE TABLE public.deliberation_votes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   topic_id UUID NOT NULL REFERENCES public.deliberation_topics(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-  vote_weight INTEGER NOT NULL CHECK (vote_weight != 0), -- 二次投票での投票ポイント数
+  vote_weight INTEGER NOT NULL CHECK (vote_weight != 0 AND vote_weight BETWEEN -100 AND 100), -- 二次投票ポイント (コスト=weight²)
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(topic_id, user_id)
 );
@@ -320,15 +321,18 @@ CREATE TABLE public.deliberation_comments (
   message TEXT NOT NULL,
   parent_id UUID REFERENCES public.deliberation_comments(id) ON DELETE CASCADE,
   opinion_cluster INTEGER, -- Pol.is的なベクトル分類クラスタ (1: 賛成派, 2: 反対派 等)
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()  -- opinion_cluster 更新時にトリガーで更新
 );
 
 -- 合意統計データ
 CREATE TABLE public.deliberation_stats (
   topic_id UUID PRIMARY KEY REFERENCES public.deliberation_topics(id) ON DELETE CASCADE,
   total_voters INTEGER NOT NULL DEFAULT 0,
-  agreement_rate REAL NOT NULL DEFAULT 0.0, -- 合意率 (0.0 - 1.0)
-  consensus_summary TEXT, -- AIによる主要な合意ポイント要約
+  consensus_score REAL NOT NULL DEFAULT 0.0,         -- 二次投票の実効合計スコア: Σ sign(w)×√|w|
+  agreement_rate REAL NOT NULL DEFAULT 0.0,           -- 合意率 (0.0 - 1.0)
+  cluster_distribution JSONB,                         -- {1: count, 2: count, 3: count}
+  consensus_summary TEXT,                             -- AIによる主要な合意ポイント要約
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```

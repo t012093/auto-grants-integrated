@@ -141,7 +141,8 @@ GET /api/v1/grants?cursor=eyJpZCI6MTAwfQ&limit=20
 | Public (可視化) | 60 req/min per IP | `/api/v1/flow/*` |
 | Protected (一般) | 100 req/min per user | `/api/v1/grants/*`, `/api/v1/projects/*`, `/api/v1/deliberation/*`, `/api/v1/crowdfunding/*` |
 | Protected (ダッシュボード) | 120 req/min per user | `/api/v1/dashboard/*` |
-| Protected (AI) | 30 req/min per user | `/api/v1/dashboard/agent-status`, `/api/v1/matches/*`, `/api/v1/proposals/*` |
+| Protected (AI) | 30 req/min per user | `/api/v1/dashboard/agent-status`, `/api/v1/matches/*` |
+| Protected (AI 生成) | 5 req/min per user | `/api/v1/proposals/generate`, `/api/v1/proposals/simulate` |
 
 レート制限超過時は `429 RATE_LIMITED` エラーを返却。レスポンスヘッダーに `Retry-After` (秒) を含める。
 
@@ -557,6 +558,7 @@ class ApplicationDecisionResponse(BaseModel):
 class TopicCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=10)
+    voting_end_date: datetime | None = None   # 投票締切日 (NULL=無期限)
 ```
 
 **Response** `201 Created`:
@@ -567,6 +569,7 @@ class TopicResponse(BaseModel):
     description: str
     created_by: str            # UUID
     status: str                # OPEN
+    voting_end_date: datetime | None = None
     created_at: datetime
 ```
 
@@ -574,12 +577,14 @@ class TopicResponse(BaseModel):
 
 #### `POST /api/v1/deliberation/topics/{topic_id}/votes`
 
-二次投票 (Quadratic Voting)。`UNIQUE(topic_id, user_id)` 制約により1ユーザー1投票。
+二次投票 (Quadratic Voting)。`UNIQUE(topic_id, user_id)` 制約により1ユーザー1投票（重複 POST は upsert で更新）。トピック status が `OPEN` かつ `voting_end_date` 未到来の場合のみ受付。ユーザーの投票コスト `Σ(weight²)` が `max_credits` (デフォルト: 100) 以内であることを検証。
 
 **Request**:
 ```python
 class VoteCreate(BaseModel):
-    vote_weight: int = Field(ne=0)    # 正=賛成、負=反対。絶対値の平方根が実効投票力
+    vote_weight: int = Field(ne=0, ge=-100, le=100)  # 正=賛成、負=反対。コスト=weight²クレジット
+    # 実効投票力 = sign(weight) × √|weight|
+    # ユーザーの持ちクレジット上限 (デフォルト100) 内で Σ(weight²) が収まる必要がある
 ```
 
 **Response** `201 Created`:
@@ -703,10 +708,15 @@ class RewardResponse(BaseModel):
 
 寄付実行。Stripe Checkout Session を作成し、クライアントにリダイレクト URL を返却。実際の寄付処理は Stripe Webhook (`checkout.session.completed`) で非同期実行（`detail_design.md §10` 参照）。
 
+**前提条件バリデーション (422/409 で拒否)**:
+- キャンペーン `status` が `ACTIVE` であること
+- キャンペーン `deadline` が未到来であること
+- `reward_id` 指定時: リワードの `available_count` が残存していること（`SELECT ... FOR UPDATE` で原子的にデクリメント）
+
 **Request**:
 ```python
 class DonateRequest(BaseModel):
-    amount: int = Field(gt=0)        # 円
+    amount: int = Field(gt=0)        # 円 (JPY はゼロ小数通貨のため Stripe にそのまま渡す)
     donor_name: str = "匿名希望"
     message: str | None = None
     reward_id: str | None = None     # UUID — 選択リターン
@@ -750,8 +760,8 @@ GraphRAG ベースの提案書自動生成。
 ```python
 class ProposalGenerateRequest(BaseModel):
     npo_id: str                       # UUID
-    target_policy_query: str          # 対象政策キーワード
-    proposal_outline: str             # 提案の概要・方針
+    target_policy_query: str = Field(min_length=2, max_length=500)   # 対象政策キーワード
+    proposal_outline: str = Field(min_length=10, max_length=2000)    # 提案の概要・方針
     grant_id: int | None = None       # 対象助成金 (参考情報)
 ```
 
@@ -762,6 +772,7 @@ class Evidence(BaseModel):
     source_document: str
     page_number: int | str | None = None
     snippet: str
+    verified: bool = True             # GraphRAG での存在検証結果 (false=LLM生成未検証)
 
 class ProposalGenerateResponse(BaseModel):
     proposal_title: str

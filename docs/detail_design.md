@@ -270,6 +270,11 @@ class MockEmbeddingService(EmbeddingServiceBase):
 # Modalが起動するまでの最大3分間、またはオフライン環境において、pg_trgm（日本語3-gram）を用いた
 # トリグラム類似度検索を PostgreSQL/Supabase 側で実行して暫定的な検索結果を返す。
 #
+# [重要] フォールバック時はベクトル検索 (pgvector) を使用しない。
+#   Modal GPU の Qwen3-Embedding (4096次元) と次元が一致しないローカルモデルで
+#   pgvector カラムに書き込むと、次元不整合エラーが発生するため。
+#   フォールバック = PostgreSQL pg_trgm による純粋なテキスト類似度検索。
+#
 # [SQL インデックスの作成（事前適用前提）]
 # CREATE EXTENSION IF NOT EXISTS pg_trgm;
 # CREATE INDEX IF NOT EXISTS idx_grants_title_trgm ON public.grants USING gin (title gin_trgm_ops);
@@ -1006,55 +1011,108 @@ class ProposalGenerator:
     """
     団体プロファイルと行政文書GraphRAGの解析結果からエビデンス（引用）付き提案書を生成する。
     """
+    LLM_TIMEOUT_SECONDS = 60
+    LLM_MAX_RETRIES = 1
+
     def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient, graph_rag: GraphRAGClient):
         self.db = db_client
         self.llm = llm_client
         self.graph_rag = graph_rag
 
     async def generate_proposal_draft(self, npo_id: str, target_policy_query: str, proposal_outline: str) -> dict:
+        # 0. 入力サニタイゼーション (プロンプトインジェクション対策)
+        #    - Pydantic 側で max_length=500/2000 のバリデーション済み (api_contract.md 参照)
+        #    - ここではデリミタ構造で LLM プロンプトを構築し、ユーザー入力を隔離する
+        target_policy_query = target_policy_query.strip()
+        proposal_outline = proposal_outline.strip()
+
         # 1. 団体情報（実績・プロフィール）の取得
         npo_profile = await self.db.fetch_one("SELECT name, bio, history FROM npo_profiles WHERE id = :id", {"id": npo_id})
 
         # 2. 自治体総合計画等を格納したGraphRAGからエビデンス付きコンテキストを検索
+        #    (セマンティック検索: ベクトル類似度 + コミュニティレベルのグラフ走査)
         rag_context = await self.graph_rag.query_community_context(
             query=target_policy_query,
             community_level=2
         )
 
         # 3. LLMを用いたエビデンス参照型プロポーザル生成
-        prompt = f"""
-        あなたは行政へのプロポーザル提案を支援するコンサルタントです。
-        以下の団体の活動実績と、自治体の行政文書（総合計画等）のコンテキストを基に、提案書（GovPro）を生成してください。
+        #    デリミタ (<system> / <context> / <user_input>) でプロンプトインジェクションを緩和
+        prompt = f"""<system>
+あなたは行政へのプロポーザル提案を支援するコンサルタントです。
+以下の「団体プロフィール」「行政文書コンテキスト」「提案方針」を基に、提案書（GovPro）を生成してください。
+エビデンスは必ず <context> 内の行政文書から引用し、存在しない文書を参照しないでください。
+</system>
+
+<context>
+【自団体プロフィール】
+名称: {npo_profile['name']}
+概要: {npo_profile['bio']}
+実績: {npo_profile['history']}
+
+【行政文書コンテキスト (GraphRAG検索結果)】
+{rag_context['context_text']}
+</context>
+
+<user_input>
+{proposal_outline}
+</user_input>
+
+<output_format>
+以下のJSONフォーマットで厳格に出力すること。
+{{
+  "proposal_title": "提案のタイトル",
+  "proposal_body_markdown": "Markdown形式の提案本文 (構成: 1.目的, 2.事業内容, 3.予算計画, 4.期待される効果)",
+  "evidences": [
+    {{
+      "assertion": "提案本文中の特定の主張・根拠",
+      "source_document": "根拠となった行政文書名 (例: 富山市総合計画2026)",
+      "page_number": "引用ページ番号または章番号",
+      "snippet": "引用された具体的な文章"
+    }}
+  ]
+}}
+</output_format>"""
+
+        # 4. LLM 呼び出し (タイムアウト + リトライ + フォールバック)
+        import asyncio
+        response_json = None
+        for attempt in range(1 + self.LLM_MAX_RETRIES):
+            try:
+                response_json = await asyncio.wait_for(
+                    self.llm.generate_json(prompt),
+                    timeout=self.LLM_TIMEOUT_SECONDS
+                )
+                break
+            except (asyncio.TimeoutError, Exception) as e:
+                if attempt >= self.LLM_MAX_RETRIES:
+                    # 全リトライ失敗 → テンプレートベースのフォールバック
+                    return {
+                        "proposal_title": f"[下書き] {npo_profile['name']} — {target_policy_query}",
+                        "proposal_body_markdown": f"## 提案概要\n\n{proposal_outline}\n\n"
+                            f"## 団体実績\n\n{npo_profile['history']}\n\n"
+                            f"## 注意\n\nAI 生成に失敗したため、テンプレートベースの下書きです。",
+                        "evidences": [],
+                        "is_fallback": True
+                    }
+
+        # 5. エビデンスのハルシネーション検証
+        #    GraphRAG/ベクトルストアで source_document の存在と snippet の類似度を検証
+        verified_evidences = []
+        for ev in response_json.get("evidences", []):
+            try:
+                verification = await self.graph_rag.verify_snippet(
+                    source_document=ev.get("source_document", ""),
+                    snippet=ev.get("snippet", ""),
+                    similarity_threshold=0.85
+                )
+                ev["verified"] = verification.get("is_verified", False)
+            except Exception:
+                ev["verified"] = False
+            verified_evidences.append(ev)
         
-        【自団体プロフィール】
-        {npo_profile['bio']}
-        実績: {npo_profile['history']}
-        
-        【行政文書コンテキスト (GraphRAG検索結果)】
-        {rag_context['context_text']}
-        
-        【提案のコア方針】
-        {proposal_outline}
-        
-        【成果要件】
-        - 提案の各セクションで「なぜこの施策が必要か」の行政側根拠（総合計画の個別方針等）を直接参照すること。
-        - 以下のJSONフォーマットで厳格に出力すること。
-        
-        出力JSON形式:
-        {{
-          "proposal_title": "提案のタイトル",
-          "proposal_body_markdown": "Markdown形式の提案本文",
-          "evidences": [
-            {{
-              "assertion": "提案本文中の特定の主張・根拠",
-              "source_document": "根拠となった行政文書名 (例: 富山市総合計画2026)",
-              "page_number": 引用ページ番号または章番号,
-              "snippet": "引用された具体的な文章"
-            }}
-          ]
-        }}
-        """
-        response_json = await self.llm.generate_json(prompt)
+        response_json["evidences"] = verified_evidences
+        response_json["is_fallback"] = False
         return response_json
 ```
 
@@ -1071,14 +1129,47 @@ class DeliberationEngine:
     """
     市民合意形成分析およびデジタル投票集計エンジン。
     """
+    MAX_CREDITS = 100  # ユーザーあたりの二次投票クレジット上限
+
     def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient):
         self.db = db_client
         self.llm = llm_client
 
+    async def validate_vote_submission(self, topic_id: str, user_id: str, vote_weight: int):
+        """
+        投票受付前のバリデーション:
+        1. トピックが OPEN かつ voting_end_date 未到来であること
+        2. ユーザーの投票コスト Σ(weight²) が MAX_CREDITS 以内であること
+        """
+        # トピック状態チェック
+        topic = await self.db.fetch_one(
+            "SELECT status, voting_end_date FROM public.deliberation_topics WHERE id = :id",
+            {"id": topic_id}
+        )
+        if not topic or topic["status"] != "OPEN":
+            raise DomainException("TOPIC_CLOSED", "This topic is not open for voting", 409)
+        if topic["voting_end_date"] and topic["voting_end_date"] < datetime.utcnow():
+            raise DomainException("VOTING_ENDED", "Voting period has ended", 409)
+
+        # クレジット残高チェック (現在の投票を除外して再計算)
+        existing_cost = await self.db.fetch_one("""
+            SELECT COALESCE(SUM(vote_weight * vote_weight), 0) as total_cost
+            FROM public.deliberation_votes
+            WHERE user_id = :uid AND topic_id != :tid
+        """, {"uid": user_id, "tid": topic_id})
+        new_total_cost = existing_cost["total_cost"] + (vote_weight ** 2)
+        if new_total_cost > self.MAX_CREDITS:
+            raise DomainException(
+                "CREDIT_EXCEEDED",
+                f"Vote cost {vote_weight}²={vote_weight**2} exceeds remaining credits "
+                f"({self.MAX_CREDITS - existing_cost['total_cost']} available)",
+                422
+            )
+
     async def calculate_quadratic_voting(self, topic_id: str) -> dict:
         """
         投票ウェイトの平方根の和による二次投票結果の集計。
-        投票数 = √投票ポイント
+        実効投票力 = sign(weight) × √|weight|
         """
         votes = await self.db.fetch_all(
             "SELECT user_id, vote_weight FROM public.deliberation_votes WHERE topic_id = :topic_id",
@@ -1092,7 +1183,7 @@ class DeliberationEngine:
             weight = vote["vote_weight"]
             if weight == 0:
                 continue
-            # 二次投票計算 (平方根による重み調整)
+            # 二次投票計算 (平方根による重み調整、符号を保持)
             direction = 1 if weight > 0 else -1
             voter_impact = direction * (abs(weight) ** 0.5)
             total_consensus_score += voter_impact
@@ -1105,27 +1196,37 @@ class DeliberationEngine:
 
     async def run_opinion_clustering(self, topic_id: str) -> dict:
         """
-        コメントをLLMにより分類（クラスタリング）し、対立軸や賛同傾向を分析する。
+        未分類コメントのみをLLMにより分類（クラスタリング）し、対立軸や賛同傾向を分析する。
         """
+        # 未分類コメントのみ取得 (再実行時のコスト削減)
         comments = await self.db.fetch_all(
-            "SELECT id, message FROM public.deliberation_comments WHERE topic_id = :topic_id",
+            "SELECT id, message FROM public.deliberation_comments "
+            "WHERE topic_id = :topic_id AND opinion_cluster IS NULL",
             {"topic_id": topic_id}
         )
         
         clustering_results = []
         for comm in comments:
             prompt = f"""
-            以下の協議コメントをトピックへのスタンスに基づいて3つのクラスタ（1: 推進・肯定的, 2: 懸念・否定的, 3: 第三の提案・中立）に分類し、クラスタID（1, 2, 3のいずれかの数値）のみを返してください。
+            以下の協議コメントをトピックへのスタンスに基づいて3つのクラスタに分類し、
+            クラスタID（1, 2, 3のいずれかの数値）のみを返してください。
+            1: 推進・肯定的, 2: 懸念・否定的, 3: 第三の提案・中立
             
             コメント:
             "{comm['message']}"
             """
             cluster_id_str = await self.llm.generate_text(prompt)
-            cluster_id = int(cluster_id_str.strip())
             
-            # DBにクラスタ分類を反映
+            # LLM出力の安全なパース (数値以外の出力に対応)
+            import re
+            match = re.search(r'[123]', cluster_id_str.strip())
+            if not match:
+                continue  # パース不能な場合はスキップ
+            cluster_id = int(match.group())
+            
+            # DBにクラスタ分類を反映 (updated_at も更新)
             await self.db.execute(
-                "UPDATE public.deliberation_comments SET opinion_cluster = :cluster WHERE id = :id",
+                "UPDATE public.deliberation_comments SET opinion_cluster = :cluster, updated_at = NOW() WHERE id = :id",
                 {"cluster": cluster_id, "id": comm["id"]}
             )
             clustering_results.append({"comment_id": comm["id"], "cluster": cluster_id})
@@ -1133,38 +1234,62 @@ class DeliberationEngine:
         return {"topic_id": topic_id, "processed_comments": len(clustering_results)}
 
     async def update_consensus_summary(self, topic_id: str):
-        """合意度（agreement_rate）の算出とAI要約の保存"""
-        votes_summary = await self.db.fetch_all("""
-            SELECT opinion_cluster, COUNT(*) as count 
-            FROM public.deliberation_comments 
-            WHERE topic_id = :topic_id AND opinion_cluster IS NOT NULL
-            GROUP BY opinion_cluster
-        """, {"topic_id": topic_id})
-        
-        # 簡易合意率 = 肯定(1) / 全コメント
-        total = sum([item["count"] for item in votes_summary])
-        positive = sum([item["count"] for item in votes_summary if item["opinion_cluster"] == 1])
-        agreement_rate = (positive / total) if total > 0 else 0.0
+        """
+        二次投票スコア・合意度（agreement_rate）・クラスタ分布の算出とAI要約の保存。
+        トランザクション内で実行し、concurrent update を防止する。
+        """
+        async with self.db.transaction() as tx:
+            # 1. 二次投票スコアの算出 (votes テーブルから)
+            qv_result = await self.calculate_quadratic_voting(topic_id)
+            total_voters = qv_result["total_voters"]
+            consensus_score = qv_result["consensus_score"]
 
-        # LLMによる主要な合意ポイントの要約生成
-        comments = await self.db.fetch_all(
-            "SELECT message FROM public.deliberation_comments WHERE topic_id = :topic_id LIMIT 50",
-            {"topic_id": topic_id}
-        )
-        comment_text = "\n".join([f"- {c['message']}" for c in comments])
-        prompt = f"以下の協議コメントを分析し、共通の合意点および主要な懸念点を3項目に要約してください。\n\nコメント一覧:\n{comment_text}"
-        summary = await self.llm.generate_text(prompt)
+            # 2. コメントベースのクラスタ分布 (agreement_rate の算出)
+            cluster_summary = await tx.fetch_all("""
+                SELECT opinion_cluster, COUNT(*) as count 
+                FROM public.deliberation_comments 
+                WHERE topic_id = :topic_id AND opinion_cluster IS NOT NULL
+                GROUP BY opinion_cluster
+            """, {"topic_id": topic_id})
+            
+            total_classified = sum([item["count"] for item in cluster_summary])
+            positive = sum([item["count"] for item in cluster_summary if item["opinion_cluster"] == 1])
+            agreement_rate = (positive / total_classified) if total_classified > 0 else 0.0
+            
+            # クラスタ分布を dict 形式に変換
+            cluster_distribution = {item["opinion_cluster"]: item["count"] for item in cluster_summary}
 
-        # 統計テーブルへUpsert
-        await self.db.execute("""
-            INSERT INTO public.deliberation_stats (topic_id, total_voters, agreement_rate, consensus_summary, updated_at)
-            VALUES (:topic_id, :total, :rate, :summary, NOW())
-            ON CONFLICT (topic_id) DO UPDATE 
-            SET total_voters = EXCLUDED.total_voters,
-                agreement_rate = EXCLUDED.agreement_rate,
-                consensus_summary = EXCLUDED.consensus_summary,
-                updated_at = NOW()
-        """, {"topic_id": topic_id, "total": total, "rate": agreement_rate, "summary": summary})
+            # 3. LLMによる主要な合意ポイントの要約生成 (各クラスタから均等にサンプリング)
+            comments = await tx.fetch_all(
+                "SELECT message, opinion_cluster FROM public.deliberation_comments "
+                "WHERE topic_id = :topic_id AND opinion_cluster IS NOT NULL "
+                "ORDER BY opinion_cluster, created_at DESC LIMIT 50",
+                {"topic_id": topic_id}
+            )
+            comment_text = "\n".join([f"- [{c.get('opinion_cluster','?')}] {c['message']}" for c in comments])
+            prompt = f"以下の協議コメント（[1]=推進, [2]=懸念, [3]=中立）を分析し、共通の合意点および主要な懸念点を3項目に要約してください。\n\nコメント一覧:\n{comment_text}"
+            summary = await self.llm.generate_text(prompt)
+
+            # 4. 統計テーブルへ Upsert (consensus_score, cluster_distribution を含む)
+            await tx.execute("""
+                INSERT INTO public.deliberation_stats 
+                    (topic_id, total_voters, consensus_score, agreement_rate, cluster_distribution, consensus_summary, updated_at)
+                VALUES (:topic_id, :total, :score, :rate, :clusters::jsonb, :summary, NOW())
+                ON CONFLICT (topic_id) DO UPDATE 
+                SET total_voters = EXCLUDED.total_voters,
+                    consensus_score = EXCLUDED.consensus_score,
+                    agreement_rate = EXCLUDED.agreement_rate,
+                    cluster_distribution = EXCLUDED.cluster_distribution,
+                    consensus_summary = EXCLUDED.consensus_summary,
+                    updated_at = NOW()
+            """, {
+                "topic_id": topic_id,
+                "total": total_voters,
+                "score": consensus_score,
+                "rate": agreement_rate,
+                "clusters": json.dumps(cluster_distribution),
+                "summary": summary
+            })
 ```
 
 ---
@@ -1182,11 +1307,16 @@ class StripeWebhookHandler:
         self.db = db_client
         self.secret = stripe_webhook_secret
 
-    async def handle_checkout_session_completed(self, stripe_payload: dict, stripe_signature: str) -> dict:
+    async def handle_checkout_session_completed(self, raw_payload: bytes, stripe_signature: str) -> dict:
+        """
+        Stripe Webhook イベントの処理。
+        NOTE: raw_payload は FastAPI の request.body() から取得した生バイト列であること。
+              JSON パース済みの dict を渡すと署名検証が失敗する。
+        """
         import stripe
-        # 1. 署名検証
+        # 1. 署名検証 (raw body + stripe-signature ヘッダー)
         try:
-            event = stripe.Webhook.construct_event(stripe_payload, stripe_signature, self.secret)
+            event = stripe.Webhook.construct_event(raw_payload, stripe_signature, self.secret)
         except Exception as e:
             return {"status": "error", "message": f"Webhook verification failed: {e}"}
 
@@ -1209,7 +1339,9 @@ class StripeWebhookHandler:
             campaign_id = metadata.get("campaign_id")
             donor_name = metadata.get("donor_name", "匿名希望")
             donor_id = metadata.get("donor_id") # Nullable (未ログイン寄付対応)
-            amount = int(session.get("amount_total", 0)) / 100 # JPY想定 (Stripeはセント/最小通貨単位のため)
+            # NOTE: JPY はゼロ小数通貨 (zero-decimal currency) のため、
+            #       Stripe の amount_total をそのまま円として使用する (÷100 は不要)。
+            amount = int(session.get("amount_total", 0))
             message = metadata.get("message")
 
             # 4. DB側の寄付処理RPC (donate_to_campaign) の実行
