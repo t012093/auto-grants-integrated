@@ -199,6 +199,82 @@ auto-grants-integrated/
 └── docs/                        # 各種ドキュメントマージ先
 ```
 
+### フロントエンド・バックエンドの初期化および整理手順
+
+現在のリポジトリルートに仮置きされている `package.json` や `index.css` を、計画通りの `frontend / backend` 構造に整理し、開発を開始するための手順です。
+
+#### 1. フロントエンドの初期セットアップ (`frontend/`)
+フロントエンドは設計通り `pnpm` を使用して Vite + React + TypeScript 構成で初期化します。
+
+1. **Vite プロジェクトの作成**:
+   ルートディレクトリで以下を実行し、`frontend` ディレクトリを生成します。
+   ```bash
+   pnpm create vite frontend --template react-ts
+   ```
+2. **依存関係の追加**:
+   `frontend/` ディレクトリに移動し、要件定義書に記載されている可視化ライブラリおよびスキーマ駆動開発に必要なツールを追加します。
+   ```bash
+   cd frontend
+   pnpm add @nivo/sankey react-globe.gl recharts
+   pnpm add -D @hey-api/openapi-ts @tanstack/react-query zod
+   ```
+3. **デザインシステム (Cosmic Glass) の適用**:
+   ルートに仮置きされている `index.css` を `frontend/src/index.css` に移動（既存のボイラープレートを上書き）します。
+4. **ルートの仮置きファイルのクリーンアップ**:
+   不要になった以下のルートファイルを削除します。
+   * `package.json`
+   * `package-lock.json`
+   * `index.css`
+
+#### 2. バックエンドの初期セットアップ (`backend/`)
+バックエンドは超高速パッケージマネージャー `uv` を使用して Python 仮想環境を構成します。
+
+1. **プロジェクトの初期化**:
+   ルートで以下を実行し、`backend` ディレクトリと `pyproject.toml` を自動生成します。
+   ```bash
+   uv init backend --app
+   ```
+2. **必要な依存関係の追加**:
+   `backend/` ディレクトリへ移動し、FastAPI などの依存関係を `uv` で管理に追加します。
+   ```bash
+   cd backend
+   uv add fastapi uvicorn pydantic pymupdf
+   ```
+
+#### 3. ルート `.gitignore` の整備
+フロントエンドとバックエンドの不要ファイルおよび秘匿情報が誤ってコミットされるのを防ぐため、ルートの `.gitignore` を以下の通り設定します。
+```gitignore
+# Node / Frontend
+node_modules/
+dist/
+build/
+.DS_Store
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python / Backend (uv)
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+openapi.json
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+```
+
 ---
 
 ## 3. 各テクノロジーの最新設定仕様
@@ -268,6 +344,124 @@ export const SubsidyManager = () => {
     </div>
   );
 };
+```
+
+### D. 開発環境の統合設定 (NEW)
+
+フロントエンドとバックエンドがローカル環境で円滑に連携するための各種構成。
+
+#### 1. Vite 開発用プロキシ設定 (`frontend/vite.config.ts`)
+ローカル開発時は、フロントエンド（`localhost:5173`）からバックエンド（`localhost:8000`）への API リクエストを CORS エラーを回避しつつシームレスに転送するため、Vite のプロキシ機能を使用する。
+
+```typescript
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,
+      },
+    },
+  },
+});
+```
+
+#### 2. バックエンド CORS ミドルウェア設定 (`backend/src/civic_grants/main.py`)
+開発時の直接アクセスや本番デプロイ時（別ドメインの場合）に備え、FastAPI に CORS 設定を適用する。
+
+```python
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import os
+
+app = FastAPI(title="Civic Grants API", version="1.0.0")
+
+# CORS 設定
+origins = [
+    "http://localhost:5173", # ローカル開発用 React
+    os.environ.get("FRONTEND_URL", "https://civic-grants.example.com") # 本番/検証環境用
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+#### 3. 環境変数テンプレート (`.env.example`)
+
+**バックエンド側 (`backend/.env.example`)**:
+```env
+PORT=8000
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_KEY=your-supabase-service-role-key
+STRIPE_API_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+MODAL_TOKEN_ID=ak-...
+MODAL_TOKEN_SECRET=as-...
+```
+
+**フロントエンド側 (`frontend/.env.example`)**:
+```env
+# 開発環境時はプロキシ経由のため空（または "/"）、本番環境時はフルパスを指定
+VITE_API_BASE_URL=
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+```
+
+#### 4. `pnpm api:sync` コマンド定義 (`frontend/package.json`)
+OpenAPI スキーマから Hey API クライアントコードを自動生成するタスクを容易に実行できるよう、スクリプトを追加する。
+
+```json
+{
+  "scripts": {
+    "api:sync": "openapi-ts"
+  }
+}
+```
+
+### E. Makefile / タスクランナー統合 (NEW)
+
+モノレポ全体の開発コマンドを一元管理するための `Makefile` をプロジェクトルートに配置する。
+
+```makefile
+.PHONY: dev dev-backend dev-frontend api-sync setup test build
+
+setup:
+	@echo "Setting up workspace..."
+	cd backend && uv sync
+	cd frontend && pnpm install
+
+dev-backend:
+	cd backend && uv run uvicorn civic_grants.main:app --reload --port 8000
+
+dev-frontend:
+	cd frontend && pnpm dev
+
+dev:
+	@echo "Starting development servers..."
+	pnpm --parallel --filter "./frontend" --filter "./backend" dev
+
+api-sync:
+	@echo "Syncing API contract..."
+	cd backend && uv run python -m civic_grants.core.export_openapi
+	cd frontend && pnpm api:sync
+
+test:
+	cd backend && uv run pytest
+	cd frontend && pnpm test
+
+build:
+	cd backend && uv build
+	cd frontend && pnpm build
 ```
 
 ---

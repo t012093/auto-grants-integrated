@@ -284,3 +284,63 @@ graph LR
   * **ネットワークグラフ**: `d3-force` または `react-force-graph` (GraphRAGの施策マップ)
 * **リアルタイム通信**:
   * `@supabase/supabase-js` (Realtime機能を用いた投票集計、ボランティア応募、メッセージ同期)
+
+---
+
+## 5. リアルタイム通信設計 (NEW)
+
+### 5.1 Supabase Realtime チャネル設計
+
+アプリケーションのインタラクティブ性を高めるため、フロントエンドとデータベース間でリアルタイム同期を実行する。これらは `supabase-js` を用いた PostgreSQL レプリケーションリスナー（Realtime Engine）によって駆動する。
+
+| 対象機能 | チャネル名 (supabase) | イベント | ペイロードデータ |
+|---|---|---|---|
+| **投票集計** | `room:deliberation_topics` | `UPDATE` (deliberation_stats) | `topic_id`, `total_voters`, `consensus_score`, `agreement_rate` |
+| **クラファン進捗** | `room:crowdfunding_campaigns` | `UPDATE` (crowdfunding_campaigns) | `id`, `current_amount`, `donor_count` |
+| **ボランティア申請** | `room:project_applications` | `INSERT`/`UPDATE` | `project_id`, `user_id`, `status` |
+| **エージェント状態** | `room:agent_logs` | `INSERT` (system_logs) | `agent_name`, `status`, `message` |
+
+### 5.2 フロントエンド Realtime クライアント設計
+
+フロントエンド側でリアルタイムに状態を受け取り、React コンポーネントの状態（または TanStack Query のキャッシュ）を更新するための hook 設計。
+
+```typescript
+import { useEffect } from 'react';
+import { supabase } from '../lib/supabaseClient';
+import { useQueryClient } from '@tanstack/react-query';
+
+export const useRealtimeSubscription = (
+  channelName: string,
+  tableName: string,
+  queryKeyToInvalidate: string[]
+) => {
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: tableName },
+        (payload) => {
+          console.log('Realtime update received:', payload);
+          // キャッシュの無効化と再読み込み
+          queryClient.invalidateQueries({ queryKey: queryKeyToInvalidate });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [channelName, tableName, queryClient, queryKeyToInvalidate]);
+};
+```
+
+### 5.3 Modal AI コールドスタート時のフォールバック UX
+
+Modal GPU の自動スケーリング仕様により、コールドスタート時（約3分間のインスタンス起動）は最初のAPI応答が遅延する。このため、システムは即座に Trigam インデックスを用いたローカルの暫定結果（`is_fallback: true`）を返却する。
+
+1. **フォールバック判定**: `GET /api/v1/grants/{id}/radar` や `/api/v1/matches/projects` のレスポンスに `is_fallback: true` を含める。
+2. **UI 制御**: フロントエンドは `is_fallback` フラグを検知した場合、ダッシュボード上に「AI検索起動中のため暫定結果を表示中... (推定残り: 3分)」というコズミック・グラス調のプログレスバーを伴う警告バナーを表示する。
+3. **バックグラウンド再検証**: 3分後にフロントエンドから API に対して再試行リクエストをバックグラウンドで自動実行し、Modal 起動後の高品質な結果にシームレスに更新する。

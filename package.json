@@ -1,4 +1,7 @@
 {
+  "name": "auto-grants-integrated",
+  "version": "1.0.0",
+  "private": true,
   "dependencies": {
     "@nivo/sankey": "^0.99.0",
     "react-globe.gl": "^2.38.0"

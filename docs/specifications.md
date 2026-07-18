@@ -487,7 +487,7 @@ $$ LANGUAGE plpgsql;
 
 ### 4.3 API エンドポイント仕様
 
-#### `GET /api/matches/projects` (おすすめプロジェクト一覧)
+#### `GET /api/v1/matches/projects` (おすすめプロジェクト一覧)
 * **認証**: 必要 (Bearer Token)
 * **クエリパラメータ**: `limit` (デフォルト 10)
 * **レスポンス**:
@@ -503,7 +503,7 @@ $$ LANGUAGE plpgsql;
   ]
   ```
 
-#### `GET /api/flows/connections` (2D 政策・助成金接続フローデータ)
+#### `GET /api/v1/connections/flows` (2D 政策・助成金接続フローデータ)
 * **概要**: 自治体総合計画から実行プロジェクトまでの縦方向の接続パス、および将来フェーズ用の横方向（同階層）の関連度データを取得します。
 * **認証**: 必要 (Bearer Token)
 * **レスポンス**:
@@ -528,11 +528,11 @@ $$ LANGUAGE plpgsql;
 
 ---
 
-## 5. 発発展的・将来フェーズ仕様 (Phase 3)
+## 5. 発展的・将来フェーズ仕様 (Phase 3)
 
 ### 5.1 採択シミュレーター (RFP Compliance Check)
 * **概要**: AIエージェント群が自治体側の審査官として動作し、作成された提案書（GovPro）が公募仕様書（RFP）の要求を満たしているかをプレ評価します。
-* **APIエンドポイント**: `POST /api/proposals/simulate`
+* **APIエンドポイント**: `POST /api/v1/proposals/simulate`
   * **リクエスト**:
     ```json
     {
