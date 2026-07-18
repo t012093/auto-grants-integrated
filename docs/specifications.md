@@ -164,6 +164,22 @@ CREATE POLICY member_access_policy ON public.members
       )
     )
   );
+
+-- 5. projects: 認証済みユーザーが作成可能、作成者のみ編集・削除可能
+-- (detail_design.md §4.2 と統一)
+ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY projects_select_policy ON public.projects
+  FOR SELECT USING (true);
+
+CREATE POLICY projects_insert_policy ON public.projects
+  FOR INSERT WITH CHECK (
+    auth.role() = 'authenticated' AND
+    auth.uid() = created_by
+  );
+
+CREATE POLICY projects_write_policy ON public.projects
+  FOR ALL USING (auth.uid() = created_by);
 ```
 
 ### 1.2 助成金・予算・自治体RAG（auto-grantsv2 & moneyflow-visualizer）

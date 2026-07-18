@@ -34,6 +34,44 @@ Authorization: Bearer <supabase_jwt>
 
 JWT は Supabase Auth が発行。フロントエンドは `supabase-js` がトークンリフレッシュを自動管理。FastAPI 側は Supabase の JWKS エンドポイントから取得した公開鍵でトークンを検証する（詳細は `detail_design.md §4.1.5` 参照）。
 
+#### トークンリフレッシュ失敗時のフロントエンド挙動
+
+リフレッシュトークンの有効期限切れ（長期間未使用後のセッション復帰等）によりトークン更新が失敗した場合、フロントエンドは以下のフローで処理する。
+
+1. **API クライアント (TanStack Query) のグローバル `onError`** で `401 UNAUTHORIZED` レスポンスを検知
+2. `supabase.auth.refreshSession()` を1回試行
+3. リフレッシュ成功 → 元のリクエストを自動リトライ
+4. リフレッシュ失敗 → `supabase.auth.signOut()` を呼び出し、ログイン画面 (`/login`) にリダイレクト
+
+```typescript
+// frontend/src/lib/queryClient.ts
+import { QueryClient } from '@tanstack/react-query';
+import { supabase } from './supabaseClient';
+
+export const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: (failureCount, error: any) => {
+        // 401 は自動リトライしない (リフレッシュフローで処理)
+        if (error?.status === 401) return false;
+        return failureCount < 3;
+      },
+    },
+    mutations: {
+      onError: async (error: any) => {
+        if (error?.status === 401) {
+          const { error: refreshError } = await supabase.auth.refreshSession();
+          if (refreshError) {
+            await supabase.auth.signOut();
+            window.location.href = '/login';
+          }
+        }
+      },
+    },
+  },
+});
+```
+
 ### 1.3 統一エラーレスポンススキーマ
 
 全エンドポイントは以下の統一形式でエラーを返却する。
