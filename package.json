@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@nivo/sankey": "^0.99.0",
+    "react-globe.gl": "^2.38.0"
+  }
+}
