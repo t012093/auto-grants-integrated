@@ -15,146 +15,114 @@
 
 ```mermaid
 graph TD
-    %% 1. 情報源 (Information Sources)
+    %% 1. 情報源
     subgraph Info_Sources ["情報源 (Information Sources)"]
-        GovPlan["行政文書 / 総合計画 (PDF/Word)"]
-        GovRFP["公募仕様書 (RFP)"]
+        GovDocs["行政文書/仕様書 (PDF/HTML)"]
         JFC_API["助成金ナビ (JFC API)"]
-        WebDOM["民間財団Webサイト (HTML/DOM)"]
-        LocalRSS["富山ローカルRSS / 自治体HP"]
-        DelibVote["市民合意・投票データ (Quadratic Voting)"]
-        NpoAsset["団体アセット (活動実績・プロフィール)"]
+        DelibVote["市民投票・合意データ"]
+        NpoAsset["団体実績・プロフィール"]
     end
 
-    %% 2. 収集・正規化パイプライン (Ingest & Normalization)
-    subgraph Ingest_Pipeline ["インジェスト・正規化パイプライン (uv / Python)"]
-        Collector["コレクター群 (jGrants API, Tree Crawler, Playwright, RSS Watcher)"]
-        Normalizer["Document Normalizer<br/>(PDF/Office/HTML -> Text)"]
-        QGate["クオリティゲート (Coverage >= 0.95)"]
-        SelfHealing["LLM 自己修復 (learn_profile / repair_extract)"]
+    %% 2. 収集・解析
+    subgraph Ingest_Pipeline ["データ収集・解析 (uv / Python)"]
+        Collector["Collector (Playwright/RSS/APIs)"]
+        Normalizer["Document Normalizer"]
+        QGate["Quality Gate (Coverage >= 0.95)"]
+        SelfHealing["LLM 自己修復ループ"]
         
-        Collector --> Normalizer
-        Normalizer --> QGate
-        QGate -- 失敗 --> SelfHealing
-        SelfHealing --> Collector
+        Collector --> Normalizer --> QGate
+        QGate -- 失敗 --> SelfHealing --> Collector
     end
 
-    %% 3. データストア & ナレッジ化
-    subgraph Data_Store_Knowledge ["データストア & ナレッジ化"]
-        PG[("PostgreSQL 15 + pgvector<br>(助成金・予算・投票・ボランティア・ZKPデータ)")]
-        Realtime["Supabase Realtime Engine<br>(クラファン決済・応募の即時通知)"]
-        ModalGPU["Modal GPU Serverless<br/>(Qwen3-Embedding / Reranker / スキルマッチング)"]
-        GraphRAG["GraphRAG (政策・施策構造化)"]
+    %% 3. GCPデータストア & ナレッジ
+    subgraph GCP_Data_Space ["GCP データストア & ナレッジ基盤"]
+        PG[("PostgreSQL 15 + pgvector (ag-postgres)")]
+        Realtime["Supabase Realtime Engine (通知/同期)"]
+        ModalGPU["Modal GPU Serverless (Reranker/Embed)"]
+        GraphRAG["GraphRAG (政策ナレッジグラフ)"]
         
-        QGate -- 合格/登録 --> PG
-        QGate -- 合格/構造化 --> GraphRAG
-        GraphRAG --> PG
         PG <--> ModalGPU
         PG --> Realtime
     end
 
-    %% 4. 統合バックエンド (FastAPI)
-    subgraph Backend_Space ["統合バックエンド (FastAPI / auto-grantsv2 ベース)"]
+    %% 4. バックエンド (FastAPI / civic_grants)
+    subgraph Backend_Space ["統合バックエンド (FastAPI / GCP)"]
         Main["FastAPI Entry (main.py)"]
+        S_Domain["助成金ドメイン (subsidies)"]
+        Gov_Domain["提案書・採択シミュレーション"]
+        Plurality_Domain["市民参加・投票 (plurality)"]
+        Sec_Domain["DID/VC・ZKP検証 (security)"]
+        SchemaExporter["Schema Exporter (export_openapi.py)"]
+        MCP_GW["MCP Gateway (67+ LLMツール)"]
         
-        subgraph Subsidies_Domain ["助成金・予算ドメイン"]
-            S_Router["routes.py (検索・一覧)"]
-            S_Rep["db.py (助成金リポジトリ)"]
-        end
-
-        subgraph GovPro_Domain ["提案書生成・シミュレーションドメイン"]
-            P_Gen["proposal_generator.py (ProposalGenerator)"]
-            P_Sim["採択シミュレーター (Simulate API)"]
-        end
-
-        subgraph Plurality_Domain ["市民参加 (Plurality) ドメイン"]
-            P_Vote["quadratic_voting.py (二次投票処理)"]
-            P_Thread["deliberation.py (合意形成スレッド)"]
-        end
-
-        subgraph Action_Domain ["実行・資金調達ドメイン"]
-            A_Vol["volunteer_service.py (スキルマッチング)"]
-            A_CF["crowdfunding.py (クラファン・資金監査)"]
-        end
-
-        subgraph Security_Domain ["認証・ZKP・DID ドメイン"]
-            Sec_Auth["did_resolver.py (DID/VC検証・バッジ発行)"]
-            Sec_ZKP["zk_proof_verifier.py (zk-SNARKs検証)"]
-        end
-
-        MCP_GW["MCP Gateway (Stdio/HTTP)<br>(67+ LLMツール公開)"]
-        
-        Main --> S_Router
-        Main --> P_Gen
-        Main --> P_Sim
+        Main --> S_Domain
+        Main --> Gov_Domain
         Main --> Plurality_Domain
-        Main --> Action_Domain
-        Main --> Security_Domain
+        Main --> Sec_Domain
         Main --> MCP_GW
+        Main --> SchemaExporter
         
-        S_Router --> S_Rep
-        S_Rep --> PG
-        
-        P_Gen -->|団体アセット取得| PG
-        P_Gen -->|政策適合エビデンス検索| GraphRAG
-        P_Sim -->|RFP適合度判定| PG
-        
+        S_Domain --> PG
+        Gov_Domain -->|団体アセット取得| PG
+        Gov_Domain -->|エビデンス検索| GraphRAG
         Plurality_Domain --> PG
-        Action_Domain --> PG
-        Security_Domain --> PG
+        Sec_Domain --> PG
     end
 
-    %% 5. 外部連携サービス
-    subgraph External_Services ["外部連携サービス"]
-        SupabaseAuth["Supabase Auth (JWT認証)"]
-        StripeAPI["Stripe API (寄付決済)"]
-        FCM["Firebase Cloud Messaging<br>(OS標準プッシュ通知)"]
-    end
+    %% 5. API連携 & スキーマ同期
+    SchemaExporter -.->|ビルド時出力| OpenAPISchema["openapi.json (API定義ファイル)"]
 
-    %% 6. フロントエンド (React 19)
-    subgraph Client_Space ["フロントエンド (Vite / React 19 / TS)"]
-        subgraph Web_Client ["PC用 Web画面"]
-            Dashboard["ダッシュボード (Active Grants, タイムライン)"]
-            Sankey["予算フロー可視化 (Sankey + 資金監査)"]
-            Globe["グローバルマップ (Globe)"]
-            GovProUI["提案書エディタ (根拠付き自動生成)"]
-            MobileBanner["アプリ移行促進バナー (モバイルWebアクセス時)"]
-        end
-
-        subgraph Mobile_App ["モバイル用アプリ (PWA / Capacitor)"]
-            CivicUI["協議・投票 (Quadratic Voting)"]
-            VolunteerUI["ボランティア (スキルマッチング)"]
-            WalletUI["シビック・ウォレット (秘密鍵・オープンバッジ管理)"]
-            ZKP_WASM["zk-SNARKs Prover (Client WASM)"]
-            
-            CivicUI --> ZKP_WASM
-            VolunteerUI --> WalletUI
-        end
-
-        ClientAPI["API クライアント層<br/>(自動生成: Query / Zod / SDK)"]
-        SecureStore["デバイスセキュアストレージ (Keystore / Secure Enclave)"]
-
-        Dashboard --> ClientAPI
-        Sankey --> ClientAPI
-        Globe --> ClientAPI
-        GovProUI --> ClientAPI
+    %% 6. フロントエンド (PC Web)
+    subgraph PC_Web_App ["PC用 Web Client (React 19 / pnpm)"]
+        Dashboard["ダッシュボード (Active Grants, タイムライン)"]
+        Sankey["予算フロー可視化 (Sankey)"]
+        GovProUI["提案書エディタ (自動生成)"]
+        Web_ClientAPI["Client API 層 (openapi-ts)"]
         
-        CivicUI --> ClientAPI
-        VolunteerUI --> ClientAPI
-        WalletUI --> SecureStore
+        Dashboard --> Web_ClientAPI
+        Sankey --> Web_ClientAPI
+        GovProUI --> Web_ClientAPI
     end
 
-    %% 外部連携 & 同期
-    ClientAPI -->|HTTPS / JSON| Main
-    Realtime -->|WebSocket| ClientAPI
-    Dashboard -.->|非同期プリウォーム| ModalGPU
-    Main --> SupabaseAuth
-    Action_Domain --> StripeAPI
-    Security_Domain --> FCM
-    ZKP_WASM -->|ZKP証明書送信| Security_Domain
-    Info_Sources --> Collector
+    %% 7. フロントエンド (モバイルApp)
+    subgraph Mobile_App ["モバイル用 App (Capacitor / PWA)"]
+        CivicUI["投票・協議 (Quadratic Voting)"]
+        WalletUI["シビック・ウォレット (バッジ管理)"]
+        ZKP_WASM["zk-SNARKs Prover (snarkjs WASM)"]
+        SecureStore["Device Secure Store (Secure Enclave)"]
+        Mob_ClientAPI["Client API 層 (openapi-ts)"]
+        
+        CivicUI --> ZKP_WASM
+        CivicUI --> Mob_ClientAPI
+        WalletUI --> SecureStore
+        WalletUI --> Mob_ClientAPI
+    end
+
+    %% 接続関係の整理
+    %% 情報源からパイプライン/DB
+    GovDocs --> Collector
+    JFC_API --> Collector
     DelibVote --> PG
     NpoAsset --> PG
+    
+    QGate -- 登録 --> PG
+    QGate -- 構造化 --> GraphRAG
+    
+    %% API連携
+    OpenAPISchema -.->|codegen| Web_ClientAPI
+    OpenAPISchema -.->|codegen| Mob_ClientAPI
+    
+    Web_ClientAPI -->|HTTPS / JSON| Main
+    Mob_ClientAPI -->|HTTPS / JSON| Main
+    Realtime -->|WebSocket| Web_ClientAPI
+    Realtime -->|WebSocket| Mob_ClientAPI
+    
+    ZKP_WASM -->|ZKP証明書送信| Sec_Domain
+    WalletUI -.->|did:key署名| CivicUI
+    
+    %% 外部サービス
+    Main --> SupabaseAuth["Supabase Auth"]
+    S_Domain --> Stripe["Stripe API (決済)"]
 ```
 
 ---
@@ -218,14 +186,29 @@ auto-grants-integrated/
 
 ## 3. 各テクノロジーの最新設定仕様
 
-### A. フロントエンド: `openapi-ts.config.ts` の最新構成
-Hey API のプラグインアーキテクチャをフル活用し、型・クライアント・React Query・Zodを同時に出力します。
+### A. バックエンド: OpenAPI スキーマのローカル出力
+フロントエンドのコード自動生成時にローカルサーバーの起動を不要にするため、バックエンド側で OpenAPI スキーマファイル（`openapi.json`）を出力するスクリプトを用意します。
+```python
+# backend/src/civic_grants/core/export_openapi.py
+import json
+from civic_grants.main import app
+
+def export_schema():
+    with open("openapi.json", "w") as f:
+        json.dump(app.openapi(), f, indent=2)
+
+if __name__ == "__main__":
+    export_schema()
+```
+
+### B. フロントエンド: `openapi-ts.config.ts` の最新構成
+Hey API では、出力された `openapi.json` ファイルを直接インプットとして指定し、型・クライアント・React Query・Zodを同時に出力します。
 
 ```typescript
 import { defineConfig } from '@hey-api/openapi-ts';
 
 export default defineConfig({
-  input: 'http://localhost:8000/openapi.json',
+  input: '../backend/openapi.json', // ローカルファイルを参照
   output: 'src/client',
   plugins: [
     '@hey-api/typescript',   // TypeScriptの型定義を生成
@@ -236,7 +219,7 @@ export default defineConfig({
 });
 ```
 
-### B. フロントエンドでの実装例 (React 19)
+### C. フロントエンドでの実装例 (React 19)
 自動生成されたフックとZodスキーマをフォームバリデーションに組み合わせる例です。
 
 ```tsx
@@ -272,29 +255,75 @@ export const SubsidyManager = () => {
 
 ---
 
-## 4. ユーザー承認・決定事項
+## 4. 採用決定事項
 
-> [!IMPORTANT]
-> ### 1. パッケージマネージャーの選択
-> フロントエンド側の依存関係管理において、どれを使用しますか？
-> - **npm** (デフォルト)
-> - **pnpm** (高速・ディスク容量節約。モノレポ構成で主流)
->
-> ### 2. パッケージ名のリネーム
-> `subsidy_radar` から `civic_grants` へリネームし、ドメイン駆動ディレクトリへ移植する形で進めてよいか。
->
-> ### 3. Git履歴の引き継ぎ
-> `subsidy-radar` のコミット履歴を引き継ぐか（`git subtree`を使用）、ファイルコピーのみとするか。
+本計画の策定にあたり、以下の設計方針を採用しました。
+
+*   **パッケージマネージャー**: **pnpm** を採用。モノレポ（`backend` / `frontend`）環境における依存管理の高速化とディスク効率を最大化します。
+*   **パッケージ名のリネーム**: 旧 `subsidy_radar` はドメイン駆動構成への移植に伴い **`civic_grants`** にリネーム統一します。
+*   **Git履歴の引き継ぎ**: 旧リポジトリのコミット履歴を追跡可能にするため、**`git subtree`** を用いて履歴を引き継ぎながら移植します。
 
 ---
 
-## 5. 検証計画 (Verification Plan)
+## 5. デプロイ設計 (GCP / VM / Cloud Run)
+
+本バックエンドサーバーは、開発・検証および本番環境として GCP (Google Cloud Platform) 上にデプロイします。
+
+### A. GCE VM (`nexloom-gce`) での Docker Compose デプロイ
+*   GCP プロジェクト: `decoded-pilot-502615-k6`
+*   ホスト: `nexloom-gce` (asia-northeast1-a)
+*   デプロイ構成: `/home/nexloom/deploy/docker-compose.ghcr.yml` 下で `ag-mcp` (Port 8002) などのコンテナとして実行。
+*   デプロイ手順:
+    1. ローカルでビルドしたイメージを GitHub Container Registry (GHCR) にプッシュ。
+    2. VM に SSH 接続し、docker compose で最新イメージをプル・コンテナ再起動。
+    ```bash
+    gcloud compute ssh nexloom-gce --zone=asia-northeast1-a --project=decoded-pilot-502615-k6 \
+      --command="sudo -u nexloom docker compose -f /home/nexloom/deploy/docker-compose.ghcr.yml pull && \
+                 sudo -u nexloom docker compose -f /home/nexloom/deploy/docker-compose.ghcr.yml --env-file /home/nexloom/deploy/stack.env restart <service-name>"
+    ```
+
+### B. Cloud Run でのサーバーレスデプロイ
+スケールアウトの必要性やAPIのエンドポイント分離に応じて、Cloud Run サービスへのデプロイも対応します。
+*   **ポートバインド要件**: Cloud Run コンテナは環境変数 `PORT` (デフォルト `8080`) をリッスンする必要があります。FastAPI 起動時にポートを `int(os.environ.get("PORT", 8000))` のように動的に解決するように実装します。
+*   **ビルド・デプロイ**: Google Cloud Build を使用して Artifact Registry にビルドし、Cloud Run にデプロイします。
+
+---
+
+## 6. 信頼・プライバシー基盤 (ZKP & DID) の技術選定
+
+市民参加型投票（Quadratic Voting）の匿名性確保と、ボランティア活動実績（オープンバッジ）の改ざん防止を実現するため、以下の技術スタックを採用します。
+
+### A. ゼロ知識証明 (ZKP / zk-SNARKs) の構成
+*   **証明生成 (Client Prover)**:
+    *   **技術選定**: **Circom** + **snarkjs (WASM)**
+    *   **実装内容**: クライアント側（PWA/Capacitor）で投票者の秘密鍵や属性を隠したまま「適正な有権者であること」の証明 (Proof) を WASM 上で生成。
+    *   **最適化**: モバイルデバイスでの負荷を最小限に抑えるため、回路 (Circuit) を極力シンプルに設計し、`.zkey` / `.wasm` などの鍵・バイナリファイルを CDN でキャッシュ配信し初期化をプリウォームします。
+*   **証明検証 (Server Verifier)**:
+    *   **技術選定**: FastAPI (Python) から **Rust/C++ bindings** もしくは **WebAssembly** 経由で snarkjs verifier を呼び出し、ミリ秒単位で高速に検証します。
+
+### B. 分散型ID (DID) & 信頼証明 (Verifiable Credentials)
+*   **DID Method**: **`did:key`** をベースに採用。
+    *   公開鍵から直接決定論的に生成されるため、高コストなブロックチェーンや分散型レジストリ（VDR）の参照なしに、オフラインかつサーバーレスで DID の名前解決（DID Resolution）が可能です。
+*   **デジタルバッジ (VC / Verifiable Credentials)**:
+    *   W3C の Verifiable Credentials Data Model に準拠。
+    *   活動実績や投票権限をバッジとして暗号署名付き JSON-LD / JWT 形式で発行 (Issue) し、ユーザーのシビック・ウォレットに保管。
+*   **秘密鍵の保管 (Wallet UI)**:
+    *   Capacitor のセキュアストレージプラグインを経由し、iOS の **Secure Enclave** および Android の **Keystore** (ハードウェア保護領域) を利用して秘密鍵を保護します。
+
+---
+
+## 7. 検証計画 (Verification Plan)
 
 ### バックエンドの検証
 *   `backend` ディレクトリで `uv run pytest` を実行し、既存テストが正常にパスすることを確認。
 
 ### APIスキーマ・型生成の検証
-*   FastAPIサーバーを起動し、フロントエンド側で `npm run api:sync` (または `pnpm api:sync`) を実行。`src/client/` 内に正確なコードが自動生成されるかを確認。
+*   バックエンドで `uv run python src/civic_grants/core/export_openapi.py` を実行し `openapi.json` を更新。
+*   フロントエンド側で `pnpm api:sync` を実行し、`src/client/` 内に正確なコードが自動生成されるかを確認。
 
 ### フロントエンドのビルド検証
-*   `pnpm dev`（または `npm run dev`）で開発サーバーが起動すること、TypeScriptのエラーがないことを確認する。
+*   `pnpm dev` で開発サーバーが起動すること、TypeScript のエラーがないこと、ビルド (`pnpm build`) が正常に通ることを確認。
+
+### GCPデプロイの検証
+*   デプロイ後に動作確認用のヘルスチェックエンドポイント（`/health` または `/docs`）にアクセスし、正常に応答が返ることを確認。
+
