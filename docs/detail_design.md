@@ -194,6 +194,11 @@ import pdfminer.high_level
 import openpyxl
 
 class CascadeWatchCollector:
+    def __init__(self, db_client: PostgreSQLClient, llm_client: ClaudeClient, embedding_service: EmbeddingServiceBase):
+        self.db = db_client
+        self.llm = llm_client
+        self.embedder = embedding_service
+
     async def process_attachment(self, url: str) -> str:
         # 一時ファイルへダウンロード
         temp_path = await self.download_temp_file(url)
@@ -234,6 +239,48 @@ class CascadeWatchCollector:
         """
         response = await self.llm.generate_json(prompt)
         return response
+
+    async def resolve_cascade_entities(self, cascade_data: dict) -> dict:
+        """
+        LLM が抽出したテキスト名称（例: '国の交付金名'）と、DB 内の既存ノード (grants/budget nodes) の
+        セマンティック類似度を計算して紐付ける名寄せ（Entity Resolution）処理。
+        """
+        resolved_results = {}
+        for level in ["national_subsidy", "prefecture_project", "city_project"]:
+            name = cascade_data.get(level)
+            if not name:
+                continue
+
+            # 1. 抽出されたテキストのベクトル化
+            embedding = await self.embedder.embed_texts([name])
+            vector = embedding[0]
+
+            # 2. pgvector コサイン類似度による類似ノードの検索
+            #    (ノード種別(category)や階層(depth)をターゲットに指定)
+            matched_node = await self.db.fetch_one("""
+                SELECT id, name, 1 - (embedding <=> :vector::vector) as similarity
+                FROM public.nodes
+                WHERE depth_level = :level
+                ORDER BY similarity DESC
+                LIMIT 1
+            """, {"vector": vector, "level": level})
+
+            # 3. 類似度が閾値 (0.85) 以上の場合は既存IDを採用。無ければ新規作成フラグを立てる
+            if matched_node and matched_node["similarity"] >= 0.85:
+                resolved_results[level] = {
+                    "id": matched_node["id"],
+                    "name": matched_node["name"],
+                    "is_new": False
+                }
+            else:
+                resolved_results[level] = {
+                    "id": None,
+                    "name": name,
+                    "is_new": True
+                }
+
+        return resolved_results
+```
 ```
 
 ---
@@ -1422,35 +1469,53 @@ class VolunteerWorkflowManager:
 
     async def complete_project_and_issue_credential(self, project_id: str, participant_id: str) -> dict:
         """
-        ボランティア完了ユーザーに対してW3C/ZKP準拠のVerifiable Credential（オープンバッジ）を発行・DB保存。
+        ボランティア完了ユーザーに対してW3C VC準拠のデジタル署名付き実績バッジを発行し、DB保存。
         """
         # 1. ユーザーのDIDと活動履歴の取得
         user = await self.db.fetch_one("SELECT did, display_name FROM public.profiles WHERE id = :id", {"id": participant_id})
         project = await self.db.fetch_one("SELECT title, duration_hours FROM public.projects WHERE id = :id", {"id": project_id})
         
-        # 2. ホルダーDIDへの暗号証明書発行 (WASM/snarkjs 等による証明生成ロジックの呼び出し)
-        credential_data = await self.zkp.generate_groth16_proof(
-            holder_did=user["did"],
-            hours=project["duration_hours"],
-            badge_name=project["title"]
-        )
+        # 2. 実績データからコミットメントハッシュの生成
+        #    (ZKP提示の公開入力としてスマホ側で一致検証させるためのハッシュ値)
+        import hashlib
+        raw_claims = f"{user['did']}:{project['title']}:{project['duration_hours']}"
+        commitment_hash = hashlib.sha256(raw_claims.encode()).hexdigest()
 
-        # 3. zk_verifiable_credentials テーブルへの挿入
+        # 3. 発行者DIDによるデジタル署名の生成 (Ed25519)
+        #    (実際の実装では KMS や秘密鍵ストアから署名鍵をロードして暗号署名を生成)
+        credential_payload = {
+            "issuer": self.zkp.get_issuer_did(),
+            "holder": user["did"],
+            "credentialSubject": {
+                "badge_name": project["title"],
+                "hours": project["duration_hours"]
+            },
+            "commitment_hash": commitment_hash
+        }
+        credential_signature = self.zkp.sign_credential_payload(credential_payload)
+
+        # 4. verifiable_credentials テーブルへの挿入 (証明データではなく署名を永続化)
         await self.db.execute("""
-            INSERT INTO public.zk_verifiable_credentials (
-                issuer_did, holder_id, holder_did, credential_type, commitment_hash, zk_proof, is_valid
+            INSERT INTO public.verifiable_credentials (
+                issuer_did, holder_id, holder_did, credential_type, commitment_hash, credential_signature, encrypted_claims, is_valid
             ) VALUES (
-                :issuer, :holder, :holder_did, 'VOLUNTEER_HOURS', :hash, :proof::jsonb, true
+                :issuer, :holder, :holder_did, 'VOLUNTEER_HOURS', :hash, :sig, :claims::jsonb, true
             )
         """, {
             "issuer": self.zkp.get_issuer_did(),
             "holder": participant_id,
             "holder_did": user["did"],
-            "hash": credential_data["commitment_hash"],
-            "proof": json.dumps(credential_data["zk_proof"])
+            "hash": commitment_hash,
+            "sig": credential_signature,
+            "claims": json.dumps(credential_payload["credentialSubject"])
         })
         
-        return {"status": "issued", "commitment_hash": credential_data["commitment_hash"]}
+        return {
+            "status": "issued", 
+            "commitment_hash": commitment_hash,
+            "credential_payload": credential_payload,
+            "credential_signature": credential_signature
+        }
 ```
 
 ---
@@ -1658,9 +1723,13 @@ def encode_cursor(cursor_data: dict) -> str:
 API に対する DoS 攻撃や過剰なスクロール・ポーリングによるサーバー過負荷を防止するため、`slowapi` ライブラリ（インメモリ Redis またはローカルキャッシュバックエンド）を用いた IP/ユーザー単位のレートリミットを実装する。
 
 ```python
+from fastapi import Request, status
+from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
+from civic_grants.core.schemas import ErrorResponse
 
 # Redis またはローカルメモリによるレート制限
 limiter = Limiter(key_func=get_remote_address)

@@ -578,19 +578,23 @@ CREATE TABLE public.trusted_issuers (
   updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW())
 );
 
--- ZKP対応 検証可能資格 (Verifiable Credentials) ストア
-CREATE TABLE public.zk_verifiable_credentials (
+-- 検証可能資格 (Verifiable Credentials) ストア
+-- ZKPでのメンバーシップ証明や検証用のコミットメントハッシュ、失効状態を追跡する
+CREATE TABLE public.verifiable_credentials (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   issuer_did TEXT NOT NULL REFERENCES public.trusted_issuers (did) ON DELETE RESTRICT, -- 発行者DID (ホワイトリスト制限)
   holder_id UUID NOT NULL REFERENCES public.profiles (id) ON DELETE CASCADE,           -- DB内部リレーション用
   holder_did TEXT NOT NULL,                                                            -- VC仕様準拠のホルダーDID（非FK、暗号検証用）
   credential_type TEXT NOT NULL,                                                       -- 'VOLUNTEER_HOURS', 'RESIDENT_PROOF'
   
-  -- 生の実績・属性データを暗号学的にコミットして隠蔽したハッシュ
+  -- 生の実績・属性データを暗号学的にコミットして隠蔽したハッシュ (ZKPの公開入力)
   commitment_hash TEXT NOT NULL UNIQUE,
   
-  -- クライアント側 (WASM) で生成された zk-SNARKs (Groth16等) の証明データ
-  zk_proof JSONB NOT NULL,
+  -- 発行者の暗号署名 (W3C VC準拠, Ed25519等)
+  credential_signature TEXT NOT NULL,
+  
+  -- 実績公開クレームデータ (暗号化されたJSONデータなど)
+  encrypted_claims JSONB,
   
   -- 資格の有効性フラグ (DIDローテーションや明示的な失効処理でfalseに設定される)
   is_valid BOOLEAN NOT NULL DEFAULT true,
@@ -601,22 +605,22 @@ CREATE TABLE public.zk_verifiable_credentials (
 -- 資格失効リスト (DIDローテーションや鍵紛失時の無効化管理用)
 CREATE TABLE public.revocation_list (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  credential_id UUID REFERENCES public.zk_verifiable_credentials (id) ON DELETE CASCADE,
+  credential_id UUID REFERENCES public.verifiable_credentials (id) ON DELETE CASCADE,
   revoked_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   reason TEXT
 );
 
 -- RLS (Row Level Security) ポリシー設定
-ALTER TABLE public.zk_verifiable_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.verifiable_credentials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.revocation_list ENABLE ROW LEVEL SECURITY;
 
 -- ホルダー本人は自身のVCを閲覧・削除可能
-CREATE POLICY zk_vc_holder_policy ON public.zk_verifiable_credentials
+CREATE POLICY vc_holder_policy ON public.verifiable_credentials
   FOR ALL
   USING (holder_id = auth.uid());
 
--- 検証者は検証用に有効な証明のみ読み込み可能
-CREATE POLICY zk_vc_verifier_policy ON public.zk_verifiable_credentials
+-- 検証者は検証用に有効な資格のみ読み込み可能
+CREATE POLICY vc_verifier_policy ON public.verifiable_credentials
   FOR SELECT
   USING (is_valid = true);
 
@@ -626,9 +630,9 @@ CREATE POLICY revocation_list_read_policy ON public.revocation_list
   USING (true);
 ```
 
-#### 5.2.1 zk_proof スキーマと検証仕様
-* **zk_proof カラム期待スキーマ (Groth16 形式)**:
-  `zk_proof` カラムに格納される JSONB データは、以下のスキーマを満たす必要があります。
+#### 5.2.1 提示用 zk_proof スキーマと検証仕様 (Client-Side Proving)
+* **API レクエスト仕様 (Groth16 形式)**:
+  ユーザー投票時や特権アクセス時にクライアント (snarkjs WASM) からサーバーへ検証用に一時送信される `zk_proof` は、以下のスキーマを満たす必要があります（DBには永続化せず、検証API内でインメモリにて使い捨て検証する）。
   ```json
   {
     "pi_a": ["string", "string", "string"],
@@ -641,22 +645,22 @@ CREATE POLICY revocation_list_read_policy ON public.revocation_list
     "public_signals": ["string"]
   }
   ```
-  * **データサイズ上限**: 10KB（アプリケーションレイヤーでのバリデーションで強制）。
-  * **使用ツール/プロトコル**: 回路記述は `Circom`、証明システムは `Groth16` (snarkjs) を使用。バックエンドの検証エンジン（Node.js / FastAPI）に事前にデプロイした `verification_key.json` をロードし、`snarkjs.groth16.verify` にて暗号学的な整合性を検証する。
+  * **データサイズ上限**: 10KB（検証エンドポイントの Pydantic バリデーションで強制）。
+  * **使用ツール/プロトコル**: 回路記述は `Circom`、証明システムは `Groth16` (snarkjs) を使用。バックエンドの検証エンジン（FastAPI）に事前にデプロイした `verification_key.json` をロードし、`snarkjs.groth16.verify` にて暗号学的な整合性を検証する。
 
 #### 5.2.2 DID ローテーションと移行ポリシー
 1. **DID ローテーションの定義**: ホルダーがセキュリティ等の理由で自身の公開鍵を変更し、新しい DID（`profiles.did`）を生成すること。
 2. **VC 移行ポリシーと無効化**: 
-   * `zk_verifiable_credentials` レコードは `holder_id` (UUID) により `profiles` と紐づいているため、DIDの変更によってレコード自体が自動的に削除されることはありません。
+   * `verifiable_credentials` レコードは `holder_id` (UUID) により `profiles` と紐づいているため、DIDの変更によってレコード自体が自動的に削除されることはありません。
    * しかし、古い DID 署名に基づいた VC はセキュリティリスクとなるため、ローテーション完了時に、古い `holder_did` を持つすべての既存 VC レコードは `is_valid = false` に自動的に更新（失効）され、同時に `revocation_list` テーブルに失効記録（理由: 'DID_ROTATION'）が挿入されます。
    * 失効した VC は検証者から参照できなくなります（RLSポリシーによりブロック）。
-   * ユーザーは、新しい DID に紐づく新規 VC の再発行（Re-issuance）を発行者（Issuer）にリクエストし、新しい ZKP 証明を生成して登録する必要があります。
+   * ユーザーは、新しい DID に紐づく新規 VC の再発行（Re-issuance）を発行者（Issuer）にリクエストし、新しいデジタル署名を含む VC をウォレットに格納する必要があります。
 
 #### 5.2.3 旧 `digital_badges` テーブルからのマイグレーション計画
-テーブル名の変更（`digital_badges` → `zk_verifiable_credentials`）は破壊的変更であるため、以下の移行手順を実施します。
-1. **依存コードの改修**: 既存の `digital_badges` を参照しているフロントエンド UI（実績一覧）および API エンドポイントを、`zk_verifiable_credentials` を参照する仕様に変更します。
+テーブル名の変更（`digital_badges` → `verifiable_credentials`）は破壊的変更であるため、以下の移行手順を実施します。
+1. **依存コードの改修**: 既存の `digital_badges` を参照しているフロントエンド UI（実績一覧）および API エンドポイントを、`verifiable_credentials` を参照する仕様に変更します。
 2. **移行用 SQL スクリプトの実行**:
-   * 新しい `trusted_issuers` テーブルおよび `zk_verifiable_credentials` テーブルを作成。
+   * 新しい `trusted_issuers` テーブルおよび `verifiable_credentials` テーブルを作成。
    * プラットフォーム自体のシステム DID を初期値として `trusted_issuers` に登録。
    * 既存の `digital_badges` のレコードを移行するため、`user_id` を `holder_id` にマッピングし、適当なプレースホルダー `holder_did` (ユーザーがDID未生成の場合はダミーDID `did:key:...`)、およびダミーの `commitment_hash` と `zk_proof` (ダミー証明データ) を作成してデータをインポート。
    * インポート完了後、旧 `digital_badges` テーブルを削除。

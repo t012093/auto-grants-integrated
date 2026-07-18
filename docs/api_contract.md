@@ -810,6 +810,68 @@ class SimulateResponse(BaseModel):
 
 ---
 
+### 3.6 Verifiable Credentials (検証可能資格)
+
+---
+
+#### `POST /api/v1/credentials/issue`
+
+ボランティア活動完了等の実績に基づいて、発行者（NPO/プラットフォーム）が署名した W3C 準拠の検証可能資格 (VC) を発行。
+
+**Request**:
+```python
+class CredentialIssueRequest(BaseModel):
+    project_id: str                   # UUID
+    participant_id: str               # UUID - 実績対象ユーザー
+```
+
+**Response** `201 Created`:
+```python
+class CredentialSubject(BaseModel):
+    badge_name: str                   # 実績名 (プロジェクトタイトル)
+    hours: float                      # 活動時間数
+
+class CredentialPayload(BaseModel):
+    issuer: str                       # 発行者DID (did:key:...)
+    holder: str                       # ホルダーDID (did:key:...)
+    credentialSubject: CredentialSubject
+    commitment_hash: str              # 暗号コミットメントハッシュ (SHA-256)
+
+class CredentialIssueResponse(BaseModel):
+    id: str                           # UUID
+    commitment_hash: str
+    credential_payload: CredentialPayload
+    credential_signature: str         # 発行者のEd25519署名
+```
+
+---
+
+#### `POST /api/v1/credentials/verify-zkp`
+
+有権者投票時や特権アクセス時に、クライアント側 (snarkjs WASM) で生成された ZKP 証明 (`zk_proof`) を検証。
+
+**Request**:
+```python
+class ZkpProof(BaseModel):
+    pi_a: list[str]
+    pi_b: list[list[str]]
+    pi_c: list[str]
+    public_signals: list[str]
+
+class ZkpVerifyRequest(BaseModel):
+    credential_type: str              # 'VOLUNTEER_HOURS', 'RESIDENT_PROOF'
+    zk_proof: ZkpProof
+```
+
+**Response** `200 OK`:
+```python
+class ZkpVerifyResponse(BaseModel):
+    is_valid: bool
+    reason: str | None = None
+```
+
+---
+
 ## 4. Pydantic モデル定義一覧
 
 本セクションは `backend/src/civic_grants/core/schemas.py` に実装する全共有モデルのインデックス。
@@ -886,3 +948,11 @@ class SimulateResponse(BaseModel):
 | `ProposalGenerateRequest` / `ProposalGenerateResponse` | 提案書生成 | §3.5 |
 | `Evidence` | エビデンス項目 | §3.5 |
 | `SimulateRequest` / `SimulateResponse` / `ReviewerScore` | シミュレーション (Phase 3) | §3.5 |
+
+### 4.10 Credentials
+
+| モデル名 | 用途 | 定義箇所 |
+|---|---|---|
+| `CredentialIssueRequest` / `CredentialIssueResponse` | バッジ署名発行 | §3.6 |
+| `CredentialPayload` / `CredentialSubject` | VCペイロード | §3.6 |
+| `ZkpVerifyRequest` / `ZkpVerifyResponse` / `ZkpProof` | ZKP証明検証 | §3.6 |
