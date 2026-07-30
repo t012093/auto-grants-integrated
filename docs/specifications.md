@@ -683,3 +683,31 @@ CREATE TABLE public.project_impacts (
 * **フローへの統合方法**: 
   `GET /api/flows/connections` 実行時、プロジェクトノード（Level 4）に `project_impacts` のデータを結合してマージし、UI上で「この資金（¥1,500,000）によって【車いす送迎120回】が実現した」という成果テキストをポップオーバーで表示します。
 
+
+---
+
+## 6. クローリング・確定Markdown変換・Embedding・UI仕様
+
+### 6.1 クローリング & Anti-Bot 回避仕様
+1. **収集エンジンの多重化**:
+   * **Camoufox (Stealth Firefox)**: C++ レベルでブラウザ・フィンガープリントを偽装し、Cloudflare / CAPTCHA 保護下にある民間の助成金・財団サイトを安全に自動巡回する。
+   * **Crawl4AI**: Web ページを巡回し、自動的にクリーンな Markdown / 構造化データへ一括変換・取得する。
+   * **Playwright / httpx / feedparser**: 従来の動的ページおよび RSS / API 通信に使用。
+2. **ハルシネーション 0% の確定的パース仕様 (Deterministic Extraction)**:
+   * **JsonCss / markdownify**: 一覧画面（SERP）および確定フォーマットのページは、CSS セレクターおよび `markdownify` によりコードレベルで確定的に抽出し、LLM を経由させない（ハルシネーション確率 0%）。
+   * **Crawl4AIExtractor (フォールバック)**: 未知・非構造化ページのみ、Pydantic スキーマ制御で LLM に限定抽出を依頼し、失敗時は正規表現・ルールベースで自動復旧。
+
+### 6.2 ローカル & クラウドのハイブリッド Embedding 仕様
+1. **ローカル / オンデバイス推論**:
+   * Node.js / エッジ環境においては `@huggingface/transformers` (Transformers.js / WASM / ONNX) を使用し、`bge-small` 等の埋め込みモデルをオフラインで計算。
+   * インメモリ WASM データベース `@electric-sql/pglite` 上でローカルベクトル検索をサポート。
+2. **クラウドGPUスケール**:
+   * 大規模セマンティック検索・スキルマッチング・再ランキング処理は Modal GPU Serverless (Qwen3-Embedding / BgeReranker) にフォールバック・オフロードする。
+
+### 6.3 React 19 UI 描画 & カンバン管理仕様
+1. **確定的 Markdown レンダリング**:
+   * 抽出した 100% 確定的な Markdown を `react-markdown` を介して VDOM にレンダリングし、XSS 防止と構造表示を担保。
+2. **申請進捗・ボランティア管理カンバン**:
+   * `@hello-pangea/dnd` を採用し、助成金申請のドラッグ＆ドロップ（準備中・提出済・採択等）管理画面を提供する。
+
+

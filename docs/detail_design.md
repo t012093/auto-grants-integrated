@@ -8,6 +8,49 @@
 
 ## 1. コレクター詳細設計
 
+### 1.0 確定的抽出エンジン & Crawl4AI 統合設計 (`crawl4ai_extractor.py`)
+
+#### ハルシネーション0%の抽出アーキテクチャ
+本プラットフォームでは、収集データからの基本項目切り出しおよび Markdown 化において、**確定的処理 (Deterministic Extraction)** を最優先とします。
+
+1. **JsonCss (CSS Selector) パース**:
+   SERP (一覧ページ) および既知要素は、LLM を介さずに CSS セレクターで直接抽出。
+2. **markdownify**:
+   HTML DOM から直接決定論的に Markdown を生成。
+3. **Crawl4AIExtractor (Pydantic / JSON スキーマ限定フォールバック)**:
+   構造化が困難な未知ページのみ、以下の厳格な JSON スキーマを強制して LLM 抽出を実行。
+
+```python
+class Crawl4AIExtractor:
+    """
+    Crawl4AI の思想を導入したセレクターレス確定的/構造化抽出クラス
+    """
+    def __init__(self, llm_client: Optional[Any] = None):
+        self.llm_client = llm_client
+
+    def extract_job_from_html(self, html_or_markdown: str, source_type: str, source_url: str) -> Optional[Dict[str, Any]]:
+        # 1. 安定した sourceId (SHA-256) 生成
+        parsed = urlparse(source_url)
+        clean_url = (parsed.netloc + parsed.path.rstrip("/")) if parsed.netloc else source_url
+        stable_id = hashlib.sha256(clean_url.encode("utf-8")).hexdigest()[:16]
+
+        # 2. 確定的な DOM / 正規表現パース (優先系列)
+        req_match = re.search(r'<dl[^>]*class=["\'][^"\']*list[^"\']*["\'][^>]*>(.*?)</dl>', html_or_markdown, re.DOTALL | re.IGNORECASE)
+        if req_match:
+            clean_markdown = markdownify.markdownify(req_match.group(1))
+            return {
+                "sourceId": stable_id,
+                "description": clean_markdown,
+                "isDeterministic": True
+            }
+
+        # 3. LLM Pydantic スキーマ抽出 (フォールバック系列)
+        if self.llm_client:
+            prompt = f"{EXTRACTION_SYSTEM_PROMPT}\n\nContent:\n{html_or_markdown[:8000]}"
+            res_text = self.llm_client.generate_content(prompt).text
+            return json.loads(res_text)
+```
+
 ### 1.1 富山県ページ差分コレクター (`diff_toyama_pref.py`)
 
 #### クラス構成と処理フロー

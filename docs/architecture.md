@@ -23,13 +23,15 @@ graph TD
 
     %% 2. 収集・正規化パイプライン (Ingest & Normalization)
     subgraph Ingest_Pipeline ["インジェスト・正規化パイプライン (uv / Python)"]
-        Collector["コレクター群 (jGrants API, Tree Crawler, Playwright, RSS Watcher)"]
-        Normalizer["Document Normalizer<br/>(PDF/Office/HTML -> Text)"]
+        Collector["コレクター群 (jGrants API, Tree Crawler, Camoufox/Playwright, RSS Watcher)"]
+        DeterministicExtractor["確定的パース (JsonCss / markdownify)<br/>(ハルシネーション 0%)"]
+        Crawl4AI["Crawl4AI / Document Normalizer<br/>(PDF/Office/HTML -> Markdown)"]
         QGate["クオリティゲート (Coverage >= 0.95)"]
-        SelfHealing["LLM 自己修復 (learn_profile / repair_extract)"]
+        SelfHealing["LLM 構造化フォールバック / 自己修復 (learn_profile / repair_extract)"]
         
-        Collector --> Normalizer
-        Normalizer --> QGate
+        Collector --> DeterministicExtractor
+        DeterministicExtractor --> Crawl4AI
+        Crawl4AI --> QGate
         QGate -- 失敗 --> SelfHealing
         SelfHealing --> Collector
     end
@@ -37,6 +39,7 @@ graph TD
     %% 3. データストア & ナレッジ化
     subgraph Data_Store_Knowledge ["データストア & ナレッジ化"]
         PG[("PostgreSQL 15 + pgvector<br>(助成金・予算・投票・ボランティア・ZKPデータ)")]
+        LocalEmbed["ローカル Embedding / PGlite<br/>(@huggingface/transformers ONNX/WASM)"]
         Realtime["Supabase Realtime Engine<br>(クラファン決済・応募の即時通知)"]
         ModalGPU["Modal GPU Serverless<br/>(Qwen3-Embedding / Reranker / スキルマッチング)"]
         GraphRAG["GraphRAG (政策・施策構造化)"]
@@ -45,6 +48,7 @@ graph TD
         QGate -- 合格/構造化 --> GraphRAG
         GraphRAG --> PG
         PG <--> ModalGPU
+        PG <--> LocalEmbed
         PG --> Realtime
     end
 
@@ -110,6 +114,8 @@ graph TD
     subgraph Client_Space ["フロントエンド (Vite / React 19 / TS)"]
         subgraph Web_Client ["PC用 Web画面"]
             Dashboard["ダッシュボード (Active Grants, タイムライン)"]
+            KanbanUI["申請進捗カンバン (@hello-pangea/dnd)"]
+            MdViewer["確定 Markdown ビューア (react-markdown)"]
             Sankey["予算フロー可視化 (Sankey + 資金監査)"]
             Globe["グローバルマップ (Globe)"]
             GovProUI["提案書エディタ (根拠付き自動生成)"]
@@ -130,6 +136,8 @@ graph TD
         SecureStore["デバイスセキュアストレージ (Keystore / Secure Enclave)"]
 
         Dashboard --> ClientAPI
+        KanbanUI --> ClientAPI
+        MdViewer --> ClientAPI
         Sankey --> ClientAPI
         Globe --> ClientAPI
         GovProUI --> ClientAPI
@@ -159,11 +167,11 @@ graph TD
 | レイヤー (図中サブグラフ名) | 役割 | 統合・実装方針 |
 |---|---|---|
 | **Info_Sources** (情報源) | 助成金・予算・行政文書・市民合意の原データ | jGrants API、民間財団Web/DOM、自治体RSS、行政文書PDF/Word、RFP、市民投票データ、団体実績を包含。 |
-| **Ingest_Pipeline** (インジェスト・正規化) | 収集・正規化・品質検証 | コレクター群（jGrants API / Tree Crawler / Playwright / RSS Watcher）→ Document Normalizer → クオリティゲート（Coverage ≧ 0.95）。失敗時は LLM 自己修復ループで自動復旧。 |
-| **Data_Store_Knowledge** (データストア & ナレッジ化) | 永続化・ベクトル化・構造化・リアルタイム配信 | PostgreSQL 15 + pgvector に全テーブルを一元管理。GraphRAG で政策・施策を知識グラフ化。Supabase Realtime Engine でクラファン決済・ボランティア応募を即時にフロントへ配信。Modal GPU (Qwen3-Embedding / BgeReranker) でセマンティック検索・スキルマッチングを実行。RLS によるセキュリティ確保。 |
+| **Ingest_Pipeline** (インジェスト・正規化) | 収集・正規化・品質検証 | コレクター群（jGrants API / Tree Crawler / **Camoufox (Stealth Firefox)** / Playwright / RSS Watcher）。**JsonCss / markdownify による確定的なパース (ハルシネーション0%)** を第一系列とし、必要に応じて **Crawl4AI** および Document Normalizer → クオリティゲート（Coverage ≧ 0.95）。失敗時のみ LLM スキーマ指定フォールバックで自動復旧。 |
+| **Data_Store_Knowledge** (データストア & ナレッジ化) | 永続化・ベクトル化・構造化・リアルタイム配信 | PostgreSQL 15 + pgvector に全テーブルを一元管理。GraphRAG で政策・施策を知識グラフ化。**@huggingface/transformers (Transformers.js / WASM / ONNX) + PGlite** によるオンデバイス/ローカルEmbeddingと、**Modal GPU (Qwen3-Embedding / BgeReranker)** による高度セマンティック検索のハイブリッド構成。Supabase Realtime でリアルタイム通知。 |
 | **Backend_Space** (統合バックエンド) | ドメインロジック・API・MCP | FastAPI + uv。助成金・予算 / 提案書生成・シミュレーション / 市民参加 (Plurality) / 実行・資金調達 / 認証・ZKP・DID の5ドメインに分割。**MCP Gateway (Stdio/HTTP)** で全APIを67+のLLMツールとして公開し、Claude等からの自然言語操作を実現。 |
 | **External_Services** (外部連携) | 認証・決済・プッシュ通知 | Supabase Auth (JWT)、Stripe API (寄付決済)、Firebase Cloud Messaging (OS標準プッシュ通知)。 |
-| **Client_Space** (フロントエンド) | PC Web + モバイルアプリ | React 19 + Vite + TypeScript。PC用 Web画面（ダッシュボード、Sankey、Globe、提案書エディタ）と、モバイル用アプリ (PWA / Capacitor: 協議・投票、ボランティア、シビック・ウォレット、zk-SNARKs Prover WASM) に論理分割。Hey API による型・SDK・Zod の完全自動生成。 |
+| **Client_Space** (フロントエンド) | PC Web + モバイルアプリ | React 19 + Vite + TypeScript。**react-markdown** による確定的 Markdown のリッチレンダリングおよび **@hello-pangea/dnd** による申請進捗カンバンボード。PC用 Web画面とモバイルアプリ (PWA / Capacitor: 協議・投票、ウォレット、zk-SNARKs Prover WASM) に論理分割。Hey API による型・SDK・Zod の自動生成。 |
 
 ---
 
