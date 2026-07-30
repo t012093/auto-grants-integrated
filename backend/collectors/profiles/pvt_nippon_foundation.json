@@ -1,0 +1,24 @@
+{
+  "source_id": "pvt_nippon_foundation",
+  "source_name": "公益財団法人 日本財団",
+  "category": "PRIVATE_FOUNDATION",
+  "acquisition_method": "crawl4ai_camoufox",
+  "url": "https://www.nippon-foundation.or.jp/grant_application",
+  "selectors": {
+    "list_selector": "ul.grant-list > li, div.m-card-grant",
+    "title_selector": "h3.title, a.title-link, .m-card-grant__title",
+    "url_selector": "a[href]",
+    "deadline_selector": "span.date, .m-card-grant__date",
+    "provider_selector": null,
+    "provider_default": "公益財団法人 日本財団",
+    "detail_body_selector": "div.p-grant-detail__body, div.main-content"
+  },
+  "noise_patterns": [
+    "^(応募する|申し込む|ログイン|保存|シェア|印刷)$",
+    "^(Apply|Save|Share|Print|Sign in)$"
+  ],
+  "quality_gate": {
+    "required_fields": ["title", "provider", "url"],
+    "min_coverage": 0.95
+  }
+}

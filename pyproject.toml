@@ -1,0 +1,23 @@
+[project]
+name = "auto-grants-integrated"
+version = "0.1.0"
+description = "Civic Grant Intelligence Platform"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27.0",
+  "beautifulsoup4>=4.12.0",
+  "markdownify>=0.14.0",
+  "lxml>=5.0.0",
+  "pydantic>=2.0",
+  "feedparser>=6.0",
+  "crawl4ai>=0.4.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

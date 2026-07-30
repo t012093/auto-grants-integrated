@@ -1,0 +1,20 @@
+{
+  "source_id": "api_jgrants",
+  "source_name": "jGrants API (デジタル庁)",
+  "category": "PUBLIC_API",
+  "acquisition_method": "httpx_api",
+  "endpoint": "https://api.jgrants-portal.go.jp/v1/subsidy",
+  "response_type": "json",
+  "data_key": "result",
+  "field_mapping": {
+    "title": "title",
+    "provider": "subsidizer",
+    "url": "target_url",
+    "deadline": "acceptance_end_datetime",
+    "max_amount": "subsidy_max_limit"
+  },
+  "quality_gate": {
+    "required_fields": ["title", "provider", "url"],
+    "min_coverage": 0.95
+  }
+}
