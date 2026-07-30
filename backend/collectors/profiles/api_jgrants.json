@@ -1,20 +1,25 @@
 {
   "source_id": "api_jgrants",
-  "source_name": "jGrants API (デジタル庁)",
+  "source_name": "jGrants API (デジタル庁公式)",
   "category": "PUBLIC_API",
   "acquisition_method": "httpx_api",
-  "endpoint": "https://api.jgrants-portal.go.jp/v1/subsidy",
+  "endpoint": "https://api.jgrants-portal.go.jp/exp/v1/public/subsidies",
+  "detail_url_template": "https://www.jgrants-portal.go.jp/subsidy/{id}",
   "response_type": "json",
   "data_key": "result",
   "field_mapping": {
+    "id": "id",
     "title": "title",
-    "provider": "subsidizer",
-    "url": "target_url",
+    "provider": "institution_name",
+    "provider_fallback": "デジタル庁/自治体",
+    "acceptance_start": "acceptance_start_datetime",
     "deadline": "acceptance_end_datetime",
-    "max_amount": "subsidy_max_limit"
+    "max_amount": "subsidy_max_limit",
+    "target_area": "target_area_search",
+    "target_employees": "target_number_of_employees"
   },
   "quality_gate": {
-    "required_fields": ["title", "provider", "url"],
+    "required_fields": ["id", "title", "acceptance_end_datetime"],
     "min_coverage": 0.95
   }
 }
