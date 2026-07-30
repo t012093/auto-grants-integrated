@@ -97,6 +97,26 @@
 
 ---
 
+### 2.5 カテゴリ E: 海外機関・グローバルファンディング (Global & Overseas Foundations)
+
+日本の NPO・NGO・シヴィックテック団体・地域起業家が申請可能な、国際機関・海外財団・Web3 パブリックグッド助成金一覧。
+
+| Source ID | 機関・財団名称 | 主な対象領域 / 助成種別 | 参照 URL / フィード | 取得手法 | 確定的抽出方式 | 更新頻度 |
+|---|---|---|---|---|---|---|
+| `gl_google_org` | **Google.org Grants** | AI 社会実装・シヴィックテック・教育・インパクト助成 | `https://www.google.org/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 月2回 |
+| `gl_gitcoin` | **Gitcoin Grants / Public Goods** | オープンソース・シヴィックテック・二次ファンディング | `https://grants.gitcoin.co/` | `httpx` (API/JSON) | JSON Direct | 1ラウンドごと |
+| `gl_globalgiving` | **GlobalGiving** | 国際助成金・グローバルクラファン・緊急支援グラント | `https://www.globalgiving.org/` | `httpx` (API/JSON) | JSON Direct | 週1回 |
+| `gl_mozilla` | **Mozilla Foundation** | オープンウェブ・AI 倫理・シヴィックテクノロジー | `https://foundation.mozilla.org/grants/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 月1回 |
+| `gl_patagonia` | **Patagonia Environmental Grants** | 草の根環境保護・地域環境保全 NPO 向けグラント | `https://www.patagonia.jp/environmental-grants/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 年2回 |
+| `gl_ford_found` | **Ford Foundation** | 社会格差是正・人権・市民社会イノベーション | `https://www.fordfoundation.org/work/our-grants/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 月1回 |
+| `gl_gates_found` | **Bill & Melinda Gates Foundation** | グローバルヘルス・地域イノベーション | `https://www.gatesfoundation.org/about/grantseeker-resources` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 月1回 |
+| `gl_open_society` | **Open Society Foundations (OSF)** | 市民参加・デジタル権益・人権・民主主義グラント | `https://www.opensocietyfoundations.org/grants` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 月1回 |
+| `gl_bloomberg` | **Bloomberg Philanthropies** | 都市イノベーション・環境・データ駆動型公共支援 | `https://www.bloomberg.org/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 月1回 |
+| `gl_ned` | **National Endowment for Democracy (NED)** | 草の根市民活動・民主主義・コミュニティ強化 | `https://www.ned.org/apply-for-a-grant/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 年4回 |
+| `gl_wb_jsdf` | **世界銀行 日本社会開発基金 (JSDF)** | 草の根コミュニティ開発・最貧層支援グラント | `https://www.worldbank.org/en/programs/jsdf` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 年2回 |
+
+---
+
 ## 3. 情報源別 収集エンジンの割り当てサマリー
 
 ```
