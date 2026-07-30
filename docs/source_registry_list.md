@@ -30,7 +30,23 @@
 
 ---
 
-### 2.2 カテゴリ B: 自治体・ローカルニュース・行政施策 (Local Government & Policies)
+### 2.2 カテゴリ B: 中央省庁・政府機関 (Central Ministries & Agencies)
+
+| Source ID | 省庁・機関名称 | 主な対象領域 / 助成金種別 | 参照 URL / フィード | 取得手法 | 確定的抽出方式 | 更新頻度 |
+|---|---|---|---|---|---|---|
+| `gov_cfa` | **こども家庭庁** | こども育成・地域子育て・児童福祉モデル事業 | `https://www.cfa.go.jp/procurement/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 1日1回 |
+| `gov_mhlw` | **厚生労働省** | 生活困窮自立支援・障害者福祉・各種助成金 | `https://www.mhlw.go.jp/stf/boshu/` | `httpx` (RSS/HTML) | XML RSS / `JsonCss` | 1日1回 |
+| `gov_maff` | **農林水産省** | 農福連携・農山漁村振興交付金・地域活性化 | `https://www.maff.go.jp/j/supply/hojo/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 1日1回 |
+| `gov_env` | **環境省** | 地域脱炭素先行地域・環境保全・ローカルSDGs | `https://www.env.go.jp/guide/boshu/` | `httpx` (RSS/HTML) | XML RSS / `JsonCss` | 1日1回 |
+| `gov_mext` | **文部科学省** | 社会教育・地域スポーツ・文化芸術振興 | `https://www.mext.go.jp/b_menu/boshu/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 1日1回 |
+| `gov_meti` | **経済産業省** | ソーシャルビジネス・地域商業活性化 (jGrants外) | `https://www.meti.go.jp/information_2/publicoffer/` | `httpx` (RSS/HTML) | XML RSS / `JsonCss` | 1日1回 |
+| `gov_cao_janpia` | **内閣府 / JANPIA** | 休眠預金等活用事業・NPO 支援助成 | `https://www.janpia.or.jp/grant/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 1日1回 |
+| `gov_cao_chihou` | **内閣府 地方創生推進事務局** | 地方創生交付金・地域活性化モデル事業 | `https://www.chiiki.go.jp/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 週2回 |
+| `gov_reconstruction` | **復興庁** | 被災地心のケア・復興支援事業公募 | `https://www.reconstruction.go.jp/topics/main-cat1/` | `Crawl4AI × Camoufox` | `JsonCss` + markdownify | 週2回 |
+
+---
+
+### 2.3 カテゴリ C: 自治体・ローカルニュース・行政施策 (Local Government & Policies)
 
 | Source ID | 情報源名称 | 対象地域 | URL / フィード | 取得手法 | 確定的抽出方式 | 更新頻度 |
 |---|---|---|---|---|---|---|
