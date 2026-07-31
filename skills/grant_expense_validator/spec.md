@@ -19,7 +19,7 @@ uv run skills/grant_expense_validator/scripts/validate_expenses.py \
 - `--org-id` (`str`, 必須): 判定対象の NPO 団体 UUID (`npo_profiles.id`)
 - `--grant-id` (`str`, 必須): 判定対象の助成金 DB ID (`grants.id` または `grants.source_grant_id`)
 - `--auto-fill` (`flag`, 任意): 余剰予算がある場合、優先度の高い経費へ自動上乗せして助成上限を 100% 満額使い切るモード
-- `--input-budget` (`str`, 任意): 事後チェックモード用 手動入力予算 JSON ファイルパス
+- `--input-budget` (`str`, 任意): 事後チェックモード用 手動入力予算 JSON ファイルパス **[⚠️ Phase 2 で実装予定・現時点では未実装]**
 - `--json` (`flag`, 任意): 結果を JSON フォーマットで標準出力
 
 ---
@@ -41,7 +41,7 @@ uv run skills/grant_expense_validator/scripts/validate_expenses.py \
 
 ## 4. テーブル仕様 (`public.grant_expense_rules`)
 
-但し書き・例外条件 (`exceptions`) をサポートするスキーマ構造：
+但し書き・例外条件 (`exceptions`) をサポートするスキーマ構造 **[⚠️ `exceptions` カラムは Phase 2 で DDL 追加・Solver 対応予定。現時点の DDL には未含]**：
 
 ```sql
 CREATE TABLE IF NOT EXISTS public.grant_expense_rules (
