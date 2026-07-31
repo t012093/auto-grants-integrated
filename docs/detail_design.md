@@ -339,9 +339,9 @@ class MockEmbeddingService(EmbeddingServiceBase):
     """
     オフラインおよびローカルテスト用のモックプロバイダ。
     pgvector コサイン類似度計算時のゼロ除算 (division by zero) エラーを防ぐため、
-    極小のランダムなノイズを乗せた 4096 次元ベクトルを返却する。
+    極小のランダムなノイズを乗せた 768 次元ベクトルを返却する。
     """
-    def __init__(self, dimensions: int = 4096):
+    def __init__(self, dimensions: int = 768):
         self.dimensions = dimensions
 
     async def embed_texts(self, texts: list[str], type: str = "passage") -> list[list[float]]:
@@ -361,7 +361,7 @@ class MockEmbeddingService(EmbeddingServiceBase):
 # トリグラム類似度検索を PostgreSQL/Supabase 側で実行して暫定的な検索結果を返す。
 #
 # [重要] フォールバック時はベクトル検索 (pgvector) を使用しない。
-#   Modal GPU の Qwen3-Embedding (4096次元) と次元が一致しないローカルモデルで
+#   Modal GPU の Embedding (768次元 bge-base-ja-v1.5) と次元が一致しないローカルモデルで
 #   pgvector カラムに書き込むと、次元不整合エラーが発生するため。
 #   フォールバック = PostgreSQL pg_trgm による純粋なテキスト類似度検索。
 #
@@ -386,7 +386,7 @@ class MockEmbeddingService(EmbeddingServiceBase):
 
 ### 3.3 Modal本番環境セマンティック検索・AIマッチング詳細設計
 
-Modal GPU上で稼働する `Qwen3-Embedding-8B` と `BgeReranker v2-m3` にアクセスし、Supabase（pgvector）と連携してセマンティック検索およびマッチングを行う本番ロジックの設計。
+Modal / ローカルで稼働する `bge-base-ja-v1.5` (768次元) と `bge-reranker-base` にアクセスし、Supabase（pgvector）と連携してセマンティック検索およびマッチングを行う本番ロジックの設計。
 
 #### クラス構成と処理フロー
 
@@ -400,11 +400,11 @@ class ModalAIService:
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
     async def get_embedding(self, text: str) -> list[float]:
-        """Qwen3-Embedding-8B による4096次元のベクトル生成"""
+        """bge-base-ja-v1.5 による768次元のベクトル生成"""
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.endpoint}/v1/embeddings",
-                json={"input": text, "model": "Qwen3-Embedding-8B"},
+                json={"input": text, "model": "bge-base-ja-v1.5"},
                 headers=self.headers,
                 timeout=10.0
             )

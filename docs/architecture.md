@@ -41,7 +41,7 @@ graph TD
         PG[("PostgreSQL 15 + pgvector<br>(助成金・予算・投票・ボランティア・ZKPデータ)")]
         LocalEmbed["ローカル Embedding / PGlite<br/>(@huggingface/transformers ONNX/WASM)"]
         Realtime["Supabase Realtime Engine<br>(クラファン決済・応募の即時通知)"]
-        ModalGPU["Modal GPU Serverless<br/>(Qwen3-Embedding / Reranker / スキルマッチング)"]
+        ModalGPU["Modal GPU / Local Serverless<br/>(bge-base-ja-v1.5 768d / ONNX Reranker)"]
         GraphRAG["GraphRAG (政策・施策構造化)"]
         
         QGate -- 合格/登録 --> PG

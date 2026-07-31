@@ -83,7 +83,7 @@ graph TD
 * `@electric-sql/pglite` (WASM PostgreSQL + pgvector) のローカルベクトルインデックス構築。
 
 #### Step 1.2: クラウド GPU 推論環境 (`ai/cloud_embed.py`)
-* Modal GPU Serverless (`Qwen3-Embedding-8B` 4096d / `bge-m3` Dense+Sparse) 呼び出しと `p-limit` (limit=3) リトライ制限。
+* Modal GPU / Local Serverless (`bge-base-ja-v1.5` 768d / `bge-reranker-base`) 呼び出しと `p-limit` (limit=3) リトライ制限。
 
 #### Step 1.3: ハイブリッド制御レイヤー (`ai/hybrid_embed.ts`)
 * DB テーブル `grants` へ `embedding_source` (`local`/`cloud`) カラムの追加。

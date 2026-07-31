@@ -49,7 +49,7 @@ CREATE TABLE public.profiles (
   bio TEXT,
   interest_areas TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
   preferred_theme TEXT NOT NULL DEFAULT 'cosmic', -- 'cosmic' (Dark) or 'nordic' (Light)
-  embedding vector(4096), -- ユーザープロファイル・スキルベクトル (Modal用)
+  embedding vector(768), -- ユーザープロファイル・スキルベクトル (bge-base-ja-v1.5 768次元)
   did TEXT UNIQUE, -- W3C標準の自己主権型分散ID (DID)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
@@ -72,6 +72,10 @@ CREATE TABLE public.npo_profiles (
   needed_resources TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
   activity_tags TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
   target_audience TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
+  organization_type TEXT NOT NULL DEFAULT 'NPO_CORPORATION', -- 法人格種別 ('NPO_CORPORATION', 'GENERAL_INC', 'UNINCORPORATED'等)
+  establishment_year INTEGER,                                  -- 設立年 (実績年数判定用)
+  annual_budget BIGINT,                                        -- 前年度事業予算額 (円)
+  prepared_documents TEXT[] DEFAULT '{}'::TEXT[],             -- 準備済み書類コードリスト
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );
@@ -195,36 +199,127 @@ CREATE TYPE public.grant_category AS ENUM (
 -- 助成金データ本体
 CREATE TABLE public.grants (
   id SERIAL PRIMARY KEY,
-  title TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  amount_max BIGINT,
-  deadline DATE,
-  details_url TEXT,
-  category public.grant_category NOT NULL DEFAULT 'PUBLIC', -- 助成金区分
-  source TEXT NOT NULL, -- データ取得元 (例: 'jgrants', 'toyama_pref', 'private_grant_portal_x')
+  source_grant_id TEXT NOT NULL,                             -- 取得元一意ID (例: jGrants id)
+  title TEXT NOT NULL,                                       -- 助成金・公募名
+  provider TEXT NOT NULL,                                    -- 主催者・提供元 (例: "デジタル庁")
+  amount_min BIGINT,                                         -- 助成下限額
+  amount_max BIGINT,                                         -- 助成上限額
+  deadline DATE,                                             -- 公募締切
+  details_url TEXT,                                          -- 詳細URL
+  target_area TEXT DEFAULT '全国',                            -- 対象地域 (例: '全国', '富山県')
+  is_rate_10_10 BOOLEAN DEFAULT FALSE,                       -- 10/10 (全額補助・定額) 判定フラグ
+  is_advance_payment BOOLEAN DEFAULT FALSE,                  -- 前払い・概算払い判定フラグ
+  eligible_org_types TEXT[] DEFAULT '{NPO_CORPORATION, GENERAL_INC, UNINCORPORATED}', -- 対象法人格リスト
+  min_years_active INTEGER DEFAULT 0,                        -- 要求最小活動実績年数
+  required_documents TEXT[] DEFAULT '{}',                    -- 必要提出書類コードリスト (定款, 決算書等)
+  detail_text TEXT,                                          -- 詳細本文テキスト
+  attachment_urls TEXT[] DEFAULT '{}',                       -- 添付要領・PDFファイルURLリスト
+  is_ocr_processed BOOLEAN DEFAULT FALSE,                    -- 添付資料テキスト抽出・OCR完了フラグ
+  status TEXT NOT NULL DEFAULT 'OPEN',                       -- 公募ステータス: 'OPEN' (受付中), 'CLOSED' (終了), 'ARCHIVED'
+  category public.grant_category NOT NULL DEFAULT 'PUBLIC',  -- 助成金区分
+  source TEXT NOT NULL,                                      -- データ取得元 (例: 'jgrants', 'toyama_pref')
   payload_json JSONB NOT NULL DEFAULT '{}'::JSONB,
-  cascade_id INTEGER, -- 交付金カスケードIDへの参照 (Nullable)
+  cascade_id INTEGER,                                        -- 交付金カスケードIDへの参照 (Nullable)
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT uq_grants_source_grant_id UNIQUE (source, source_grant_id)
 );
 
 CREATE INDEX idx_grants_payload_data_hash ON public.grants ((payload_json->>'data_hash'));
 CREATE INDEX idx_grants_cascade_id ON public.grants(cascade_id);
 CREATE INDEX idx_grants_category ON public.grants(category);
 CREATE INDEX idx_grants_source ON public.grants(source);
+CREATE INDEX idx_grants_status ON public.grants(status);
+CREATE INDEX idx_grants_rate_10_10 ON public.grants (is_rate_10_10) WHERE is_rate_10_10 = TRUE;
+CREATE INDEX idx_grants_advance_payment ON public.grants (is_advance_payment) WHERE is_advance_payment = TRUE;
+CREATE INDEX idx_grants_target_area ON public.grants(target_area);
+CREATE INDEX idx_grants_amount_max ON public.grants(amount_max);
+CREATE INDEX idx_grants_payload_json_gin ON public.grants USING GIN (payload_json);
+
+-- ※ パイプライン（差分同期・添付OCR解析・RAGベクトル化・レート制御・アラート）の詳細は [grant_pipeline_spec.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/docs/grant_pipeline_spec.md) を参照。
 
 -- ベクトル知識チャンク (Modal GPU Embedding用)
 CREATE TABLE public.knowledge_chunks (
   id SERIAL PRIMARY KEY,
   grant_id INTEGER REFERENCES public.grants(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
-  embedding vector(4096) NOT NULL, -- Modal 4096次元
+  embedding vector(768) NOT NULL, -- bge-base-ja-v1.5 768次元
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- HNSW インデックス（コサイン類似度用）
 CREATE INDEX idx_knowledge_chunks_embedding_hnsw
 ON public.knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+
+-- 過去採択事例データ (past_award_analyzer 用)
+CREATE TABLE public.grant_past_awards (
+  id SERIAL PRIMARY KEY,
+  grant_id INTEGER REFERENCES public.grants(id) ON DELETE SET NULL,  -- 関連する現行助成金ID (Nullable)
+  source TEXT NOT NULL,                                               -- データ取得元 ('jgrants', 'foundation_web' 等)
+  funder_name TEXT NOT NULL,                                          -- 助成元名称 (例: '日本財団')
+  program_name TEXT NOT NULL,                                         -- 助成プログラム名
+  award_year INTEGER NOT NULL,                                        -- 採択年度
+  recipient_name TEXT,                                                 -- 採択団体名
+  project_title TEXT NOT NULL,                                         -- 採択事業名
+  award_amount BIGINT,                                                 -- 採択金額 (円)
+  project_summary TEXT,                                                -- 事業概要テキスト
+  evaluation_comment TEXT,                                             -- 選定評・審査コメント
+  source_url TEXT,                                                     -- 取得元URL
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_grant_past_awards_funder ON public.grant_past_awards(funder_name);
+CREATE INDEX idx_grant_past_awards_year ON public.grant_past_awards(award_year);
+
+-- 助成金別 経費ルール (grant_expense_validator 用: ハルシネーション0%確定パースで抽出)
+CREATE TABLE public.grant_expense_rules (
+  id SERIAL PRIMARY KEY,
+  grant_id INTEGER NOT NULL REFERENCES public.grants(id) ON DELETE CASCADE,
+  category_code TEXT NOT NULL,              -- 経費区分コード ('PERSONNEL', 'SYSTEM_DEV', 'MARKETING' 等)
+  category_label TEXT NOT NULL,             -- 経費区分表示名 ('人件費', 'システム開発費' 等)
+  allowed BOOLEAN NOT NULL DEFAULT TRUE,    -- 対象可否 (TRUE=対象内, FALSE=対象外)
+  max_limit BIGINT,                         -- 上限金額 (円, NULL=制限なし)
+  max_ratio NUMERIC(5,4),                   -- 総額に対する上限比率 (例: 0.2500 = 25%)
+  notes TEXT,                               -- 補足条件 (例: '役員不可・従業員のみ')
+  evidence_quote TEXT,                      -- 抽出根拠の原文引用句 (Substring Guard 検証済み)
+  evidence_page TEXT,                       -- 根拠の出典ページ番号
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT uq_expense_rule UNIQUE (grant_id, category_code)
+);
+
+CREATE INDEX idx_grant_expense_rules_grant ON public.grant_expense_rules(grant_id);
+
+-- 団体の経費希望優先度 (動的配分 Solver 用)
+CREATE TABLE public.npo_expense_preferences (
+  id SERIAL PRIMARY KEY,
+  npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
+  category_code TEXT NOT NULL,              -- 経費区分コード ('PERSONNEL', 'SYSTEM_DEV' 等)
+  priority INTEGER NOT NULL,                -- 使いたい優先度 (1=最優先, 2=次点...)
+  desired_amount BIGINT,                    -- 希望金額 (円)
+  notes TEXT,                               -- 補足メモ (例: 'エンジニア2名分')
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT uq_npo_expense_pref UNIQUE (npo_profile_id, category_code)
+);
+
+CREATE INDEX idx_npo_expense_pref_profile ON public.npo_expense_preferences(npo_profile_id);
+
+-- 適合通知アラート (grant_matching_engine / grant_lifecycle_manager 用)
+CREATE TABLE public.alerts (
+  id SERIAL PRIMARY KEY,
+  npo_profile_id UUID REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
+  grant_id INTEGER REFERENCES public.grants(id) ON DELETE CASCADE,
+  alert_type TEXT NOT NULL DEFAULT 'ELIGIBILITY_MATCH',  -- 'ELIGIBILITY_MATCH', 'DEADLINE_REMINDER', 'NEW_GRANT', 'DOCUMENT_MISSING'
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  match_score INTEGER,                      -- 適合度スコア (0-100)
+  is_read BOOLEAN DEFAULT FALSE,
+  is_notified BOOLEAN DEFAULT FALSE,        -- Webhook/Email 通知済みフラグ
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_alerts_npo_profile ON public.alerts(npo_profile_id);
+CREATE INDEX idx_alerts_unread ON public.alerts(is_read) WHERE is_read = FALSE;
 
 -- 予算フローノード (moneyflow-visualizer)
 CREATE TABLE public.nodes (
@@ -412,7 +507,7 @@ CREATE TABLE public.projects (
   status public.project_status NOT NULL DEFAULT 'DRAFT',
   participants INTEGER NOT NULL DEFAULT 0,
   max_participants INTEGER NOT NULL DEFAULT 1,
-  embedding vector(4096), -- プロジェクト要求・目的ベクトル (Modal用)
+  embedding vector(768), -- プロジェクト要求・目的ベクトル (bge-base-ja-v1.5 768次元)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );

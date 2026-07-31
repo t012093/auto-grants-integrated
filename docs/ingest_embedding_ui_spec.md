@@ -411,9 +411,8 @@ def has_matching_keyword_without_negation(
 │  ローカルモード   │  │  クラウドモード               │
 │  ────────────── │  │  ──────────────────────────── │
 │  Transformers.js │  │  Modal GPU Serverless         │
-│  (ONNX/WASM)    │  │  Qwen3-Embedding-8B (4096d)  │
-│  bge-small-en   │  │  BgeReranker-v2-m3            │
-│  384 次元        │  │  4096 次元                    │
+│  bge-base-ja-v1.5│  │  bge-base-ja-v1.5            │
+│  768 次元        │  │  768 次元                     │
 │  ────────────── │  │  ──────────────────────────── │
 │  PGlite (WASM)  │  │  PostgreSQL + pgvector        │
 │  ローカル検索    │  │  本番検索 + RLS               │
@@ -463,7 +462,7 @@ class LocalEmbeddingService {
 | 項目 | 仕様 |
 |---|---|
 | プラットフォーム | Modal GPU Serverless |
-| モデル (Dense) | `Alibaba-NLP/Qwen3-Embedding-8B` (4096 次元) |
+| モデル (Dense) | `BAAI/bge-base-ja-v1.5` (768 次元) |
 | モデル (Hybrid) | `BAAI/bge-m3` (Dense 1024d + Sparse ベクトル同時生成) — jobflow 検証済み |
 | Reranker | `BAAI/bge-reranker-v2-m3` |
 | データベース | Supabase PostgreSQL 15 + pgvector |
@@ -499,7 +498,7 @@ class HybridEmbeddingService {
 
 ### 4.5 次元数の不一致への対応
 
-ローカル (384d) とクラウド (4096d) でベクトル次元が異なるため:
+ローカル・クラウド共通で 768 次元 (`bge-base-ja-v1.5`) に統一・標準化。
 
 1. **検索時**: 同一モードで生成されたベクトル同士でのみ検索を実行。`embedding_source` カラムでフィルタリング。
 2. **移行時**: ローカルで蓄積したデータは、クラウド接続復旧後にバックグラウンドで再 Embedding (バッチ処理)。
@@ -695,6 +694,6 @@ function GrantKanban({ grants, onStageChange }: {
 ## 7. 制約事項と既知の制限
 
 1. **Camoufox バージョン固定**: `camoufox==0.4.11` と `playwright==1.60.0` はピン留め。Playwright 1.61+ は Camoufox の Juggler プロトコルと非互換。
-2. **ローカル Embedding の次元数**: `bge-small-en` は 384 次元であり、クラウドの Qwen3 (4096 次元) とは互換性がない。同一モード内でのみ検索を実行すること。
+2. **Embedding の次元数**: 日本語標準モデル `bge-base-ja-v1.5` (768 次元) に統一。ローカル (ONNX/WASM)・クラウド共通で完全互換。
 3. **markdownify の制限**: 複雑なテーブル構造 (colspan/rowspan) は不完全な Markdown に変換される場合がある。その場合は Crawl4AI にフォールバック。
 4. **react-markdown の制限**: HTML の直接レンダリングはデフォルトで無効 (XSS 防止)。`rehype-raw` は意図的に不使用。

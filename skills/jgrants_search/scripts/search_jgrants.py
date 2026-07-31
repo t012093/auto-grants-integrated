@@ -3,7 +3,7 @@
 jGrants 汎用検索 & 条件フィルタリング CLI スクリプト (search_jgrants.py)
 
 デジタル庁 jGrants 公式 API に接続し、指定された条件
-(--keyword, --area, --rate-10-10, --advance-payment, --limit)
+(--keyword, --area, --rate-10-10, --advance-payment, --min-amount, --max-amount, --limit, --json)
 に基づいて助成金・公募情報を検索・抽出します。
 """
 
@@ -32,24 +32,37 @@ async def fetch_detail(client: httpx.AsyncClient, gid: str) -> dict:
         pass
     return {}
 
-async def run_search(keyword: str, area: str, rate_10_10: bool, advance_payment: bool, limit: int):
+async def run_search(keyword: str, area: str, rate_10_10: bool, advance_payment: bool, min_amount: int, max_amount: int, limit: int, output_json: bool):
     headers = {"User-Agent": "AutoGrantsBot/1.0", "Accept": "application/json"}
-    params = {"keyword": keyword or "助成金", "sort": "created_date", "order": "DESC", "acceptance": "1"}
+    
+    # キーワード横断取得ロジック
+    search_keywords = [keyword] if keyword else ["事業", "補助金", "助成金", "支援"]
+    list_items = []
+    seen_ids = set()
 
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
-        res = await client.get(JGRANTS_LIST_API, params=params)
-        list_items = []
-        if res.status_code == 200:
-            list_items = res.json().get("result", [])
-        else:
-            # バックアップ・スナップショットフォールバック
+        for kw in search_keywords:
+            params = {"keyword": kw, "sort": "created_date", "order": "DESC", "acceptance": "1"}
+            res = await client.get(JGRANTS_LIST_API, params=params)
+            if res.status_code == 200:
+                for item in res.json().get("result", []):
+                    gid = item.get("id")
+                    if gid and gid not in seen_ids:
+                        seen_ids.add(gid)
+                        list_items.append(item)
+
+        if not list_items:
+            # スナップショットフォールバック
             snapshot_path = Path(".cache/snapshots/jgrants_real_sample.json")
             if snapshot_path.exists():
                 with open(snapshot_path, "r", encoding="utf-8") as f:
                     list_items = json.load(f).get("result", [])
 
         if not list_items:
-            print("No items retrieved from jGrants API.")
+            if output_json:
+                print("[]")
+            else:
+                print("No items retrieved from jGrants API.")
             return
 
         results = []
@@ -70,12 +83,22 @@ async def run_search(keyword: str, area: str, rate_10_10: bool, advance_payment:
                     continue
 
                 # 10/10 フィルター
-                if rate_10_10 and not any(re.search(p, combined_text) for p in RATE_10_10_PATTERNS):
+                if rate_10_10 and not any(re.search(p, combined_text, re.IGNORECASE) for p in RATE_10_10_PATTERNS):
                     continue
 
                 # 前払い/概算払いフィルター
-                if advance_payment and not any(re.search(p, combined_text) for p in ADVANCE_PATTERNS):
+                if advance_payment and not any(re.search(p, combined_text, re.IGNORECASE) for p in ADVANCE_PATTERNS):
                     continue
+
+                # 金額フィルター
+                max_limit_val = target_detail.get("subsidy_max_limit", item.get("subsidy_max_limit"))
+                if min_amount is not None or max_amount is not None:
+                    if not isinstance(max_limit_val, (int, float)):
+                        continue
+                    if min_amount is not None and max_limit_val < min_amount:
+                        continue
+                    if max_amount is not None and max_limit_val > max_amount:
+                        continue
 
                 gid = target_detail.get("id", item.get("id"))
                 results.append({
@@ -83,7 +106,7 @@ async def run_search(keyword: str, area: str, rate_10_10: bool, advance_payment:
                     "title": target_detail.get("title", item.get("title")),
                     "subsidy_rate": subsidy_rate or "記載なし",
                     "target_area": g_area,
-                    "max_amount": target_detail.get("subsidy_max_limit", item.get("subsidy_max_limit", "記載なし")),
+                    "max_amount": max_limit_val if max_limit_val is not None else "記載なし",
                     "deadline": target_detail.get("acceptance_end_datetime", "未設定"),
                     "url": f"https://www.jgrants-portal.go.jp/subsidy/{gid}"
                 })
@@ -92,9 +115,13 @@ async def run_search(keyword: str, area: str, rate_10_10: bool, advance_payment:
                     break
             if len(results) >= limit:
                 break
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
-        # 結果表示 (JSON & Formatted Text)
+        if output_json:
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+            return
+
+        # 結果表示 (Formatted Text)
         print(f"=== jGrants 検索結果 (該当: {len(results)} 件) ===")
         for i, r in enumerate(results, 1):
             print(f"[{i}] {r['title']}")
@@ -107,14 +134,18 @@ async def run_search(keyword: str, area: str, rate_10_10: bool, advance_payment:
 
 def main():
     parser = argparse.ArgumentParser(description="jGrants 公式 API 条件検索 CLI")
-    parser.add_argument("--keyword", type=str, default="", help="検索キーワード (例: 地域, NPO, 子育て)")
+    parser.add_argument("--keyword", type=str, default="", help="検索キーワード (未指定時は主要語で自動横断取得)")
     parser.add_argument("--area", type=str, default="", help="対象地域 (例: 富山県, 東京都, 全国)")
     parser.add_argument("--rate-10-10", action="store_true", help="補助率 10/10 (全額補助・定額) のみに絞り込む")
     parser.add_argument("--advance-payment", action="store_true", help="概算払い・前払い記載のあるものに絞り込む")
+    parser.add_argument("--min-amount", type=int, default=None, help="助成上限額の下限 (円)")
+    parser.add_argument("--max-amount", type=int, default=None, help="助成上限額の上限 (円)")
+    parser.add_argument("--org-id", type=str, default="", help="登録団体 ID (指定した団体の要件・活動・提出書類と自動照合)")
     parser.add_argument("--limit", type=int, default=10, help="表示件数の上限")
+    parser.add_argument("--json", action="store_true", help="JSON 形式で結果を出力")
 
     args = parser.parse_args()
-    asyncio.run(run_search(args.keyword, args.area, args.rate_10_10, args.advance_payment, args.limit))
+    asyncio.run(run_search(args.keyword, args.area, args.rate_10_10, args.advance_payment, args.min_amount, args.max_amount, args.limit, args.json))
 
 if __name__ == "__main__":
     main()
