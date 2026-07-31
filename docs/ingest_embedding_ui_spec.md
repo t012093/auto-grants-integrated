@@ -441,7 +441,7 @@ class LocalEmbeddingService {
   async init() {
     this.embedder = await pipeline(
       "feature-extraction",
-      "BAAI/bge-small-en-v1.5",
+      "BAAI/bge-m3",
       { device: "wasm" }
     );
   }

@@ -66,6 +66,17 @@ class ConstraintSolver:
     """Deterministic Constraint Solver with Auto-Fill & Re-categorization (0% Hallucination)"""
 
     @classmethod
+    def _verify_harness_guard(
+        cls, allocated_items: List[Dict[str, Any]], grant_amount_max: int
+    ) -> None:
+        """配分合計が助成上限額を超過していないかを検証するガードメソッド。"""
+        total_allocated = sum(item["allocated_amount"] for item in allocated_items)
+        if total_allocated > grant_amount_max:
+            raise HarnessGuardError(
+                f"Harness Guard Failed: Total allocated ({total_allocated:,}円) exceeds grant limit ({grant_amount_max:,}円)"
+            )
+
+    @classmethod
     def _compute_effective_limit(
         cls, rule: Dict[str, Any], grant_amount_max: int
     ) -> Tuple[Optional[int], Optional[str]]:
@@ -309,10 +320,7 @@ class ConstraintSolver:
         total_allocated = sum(item["allocated_amount"] for item in allocated_items)
 
         # Harness Guard Verification
-        if total_allocated > grant_amount_max:
-            raise HarnessGuardError(
-                f"Harness Guard Failed: Total allocated ({total_allocated:,}円) exceeds grant limit ({grant_amount_max:,}円)"
-            )
+        cls._verify_harness_guard(allocated_items, grant_amount_max)
 
         return allocated_items, remaining_budget, recommendations, auto_fill_applied
 

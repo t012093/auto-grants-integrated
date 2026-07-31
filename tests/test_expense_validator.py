@@ -289,10 +289,19 @@ class TestHarnessGuardCatchesOverflow:
     """Harness Guard: 合計超過時に HarnessGuardError"""
 
     def test_overflow_detected(self):
-        """
-        正常なルールとプリファレンスでは HarnessGuard は発火しない。
-        HarnessGuard は Solver 内部のバグに対する最終防衛ラインであり、
-        正常入力では到達不能。ここでは raise を直接テストする。
-        """
-        with pytest.raises(HarnessGuardError):
-            raise HarnessGuardError("Test overflow")
+        """_verify_harness_guard が配分超過を検出して HarnessGuardError を送出する"""
+        overflow_items = [
+            {"allocated_amount": 600_000},
+            {"allocated_amount": 500_000},
+        ]
+        with pytest.raises(HarnessGuardError, match="exceeds grant limit"):
+            ConstraintSolver._verify_harness_guard(overflow_items, 1_000_000)
+
+    def test_no_overflow_passes(self):
+        """配分合計が上限以下なら HarnessGuardError は発生しない"""
+        valid_items = [
+            {"allocated_amount": 400_000},
+            {"allocated_amount": 600_000},
+        ]
+        # 例外が発生しないことを確認（上限ちょうどは OK）
+        ConstraintSolver._verify_harness_guard(valid_items, 1_000_000)
