@@ -247,6 +247,21 @@ CREATE TABLE IF NOT EXISTS public.alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_npo_profile ON public.alerts(npo_profile_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_unread ON public.alerts(npo_profile_id) WHERE is_read = FALSE;
 
+-- NPO 側知識チャンク (bge-base-ja-v1.5 768次元)
+CREATE TABLE IF NOT EXISTS public.npo_knowledge_chunks (
+  id SERIAL PRIMARY KEY,
+  npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
+  chunk_type TEXT NOT NULL, -- 'ACTIVITY_TAGS', 'TARGET_AUDIENCE', 'DESCRIPTION'
+  content TEXT NOT NULL,
+  embedding vector(768) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT uq_npo_chunk_type UNIQUE (npo_profile_id, chunk_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_npo_knowledge_chunks_embedding_hnsw
+ON public.npo_knowledge_chunks USING hnsw (embedding vector_cosine_ops);
+
+
 -- 6. トリガー設定
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_profiles_updated_at') THEN

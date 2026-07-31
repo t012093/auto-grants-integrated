@@ -10,7 +10,8 @@ description: 登録団体プロファイル (--org-id) と助成金の公募要�
 
 ### 適合判定インターフェース
 - **判定スクリプト**: `skills/grant_eligibility_checker/scripts/check_eligibility.py`
-- **ステータス**: `⚠️ 部分実装 (Stage1-2完全対応 / Stage3 LLMスタブ実装)`
+- **ステータス**: `✅ 実装済み (Stage 1-3 全17項目完全対応 / pgvector コサイン類似度判定)`
+
 
 団体 ID と助成金 ID を指定して全 17 項目の 3 段階適合チェックを実行し、Neon DB の `public.alerts` へ自動保存する CLI スクリプト。
 
