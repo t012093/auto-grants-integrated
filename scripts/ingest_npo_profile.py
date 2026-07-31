@@ -25,8 +25,10 @@ env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-DEFAULT_MODEL_NAME = "cl-tohoku/bert-base-japanese-v3"
+DEFAULT_MODEL_NAME = "cl-nagoya/sup-simcse-ja-base"
 BATCH_COMMIT_SIZE = 10
+
+
 
 
 class NPOProfileEmbedder:
