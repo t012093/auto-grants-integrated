@@ -261,7 +261,6 @@ CREATE TABLE IF NOT EXISTS public.npo_knowledge_chunks (
 CREATE INDEX IF NOT EXISTS idx_npo_knowledge_chunks_embedding_hnsw
 ON public.npo_knowledge_chunks USING hnsw (embedding vector_cosine_ops);
 
-
 -- 6. トリガー設定
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_profiles_updated_at') THEN

@@ -142,17 +142,30 @@ class Stage2DocumentMatcher:
 class Stage3SemanticEvaluator:
     """Stage 3: 8-Item Semantic Alignment (pgvector Cosine Similarity) & Qualitative Rules"""
 
+    # pgvector クエリ失敗時・データ未投入時のフォールバックスコア
+    FALLBACK_SCORE = 75
+
     @staticmethod
-    def _get_vector_similarity(cur: Any, npo_id: str, grant_id: int, chunk_type: str) -> tuple[int, Optional[str]]:
+    def _get_vector_similarity(cur: Any, npo_id: str, grant_id: int, chunk_type: str) -> Tuple[int, Optional[str]]:
+        """NPO チャンクと助成金チャンクの最近傍コサイン類似度を返す。
+
+        NPO 側は chunk_type フィルタで 1 行に絞られ、助成金側は
+        サブクエリ内で最近傍 1 件のみ取得するため直積は発生しない。
+        """
         try:
             cur.execute(
                 """
-                SELECT kc.content, 1 - (kc.embedding <=> nc.embedding) AS similarity
-                FROM public.npo_knowledge_chunks nc
-                JOIN public.knowledge_chunks kc ON kc.grant_id = %s
-                WHERE nc.npo_profile_id = %s AND nc.chunk_type = %s
-                ORDER BY kc.embedding <=> nc.embedding
-                LIMIT 1;
+                SELECT sub.content, sub.similarity
+                FROM public.npo_knowledge_chunks nc,
+                LATERAL (
+                    SELECT kc.content,
+                           1 - (kc.embedding <=> nc.embedding) AS similarity
+                    FROM public.knowledge_chunks kc
+                    WHERE kc.grant_id = %s
+                    ORDER BY kc.embedding <=> nc.embedding
+                    LIMIT 1
+                ) sub
+                WHERE nc.npo_profile_id = %s AND nc.chunk_type = %s;
                 """,
                 (grant_id, npo_id, chunk_type)
             )
@@ -162,8 +175,8 @@ class Stage3SemanticEvaluator:
                 score = int(min(max(sim, 0.0), 1.0) * 100)
                 return score, row.get("content")
         except Exception as e:
-            logging.debug(f"pgvector query fallback for {chunk_type}: {e}")
-        return 75, None
+            logging.warning(f"pgvector query fallback for {chunk_type}: {e}")
+        return Stage3SemanticEvaluator.FALLBACK_SCORE, None
 
     @classmethod
     def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
@@ -233,10 +246,17 @@ class Stage3SemanticEvaluator:
         scores["compliance"] = 100
 
         # Substring Match Guard Check
-        valid_quotes = [q for q in evidence_quotes if q in detail_text or q in title]
+        # pgvector 由来の quote は detail_text の部分文字列とは限らないため、
+        # 完全一致ではなく 20 文字以上の重複部分があれば evidence として採用する。
+        valid_quotes = []
+        for q in evidence_quotes:
+            if q in detail_text or q in title:
+                valid_quotes.append(q)
+            elif len(q) >= 20 and any(q[i:i+20] in detail_text for i in range(len(q) - 19)):
+                valid_quotes.append(q)
         if not valid_quotes and detail_text:
             snippet = detail_text[:60].strip()
-            if snippet and snippet in detail_text:
+            if snippet:
                 valid_quotes.append(snippet)
 
         avg_score = int(sum(scores.values()) / len(scores)) if scores else 80
@@ -281,28 +301,28 @@ class EligibilityChecker:
                 stage2 = Stage2DocumentMatcher.evaluate(npo, grant)
                 stage3 = Stage3SemanticEvaluator.evaluate(cur, npo, grant)
 
-        if not stage1["all_pass"]:
-            total_score = 0
-            status = "FAIL"
-        else:
-            total_score = int(stage2["score"] * 0.4 + stage3["score"] * 0.6)
-            status = "PASS" if total_score >= 70 else "WARNING"
+                if not stage1["all_pass"]:
+                    total_score = 0
+                    status = "FAIL"
+                else:
+                    total_score = int(stage2["score"] * 0.4 + stage3["score"] * 0.6)
+                    status = "PASS" if total_score >= 70 else "WARNING"
 
-        # Align keys with spec.md output schema
-        report = {
-            "grant_id": grant["id"],
-            "grant_title": grant["title"],
-            "npo_profile_id": str(npo["id"]),
-            "npo_name": npo["name"],
-            "match_score": total_score,
-            "status": status,
-            "stage1_results": stage1,
-            "stage2_results": stage2,
-            "stage3_results": stage3,
-            "evaluated_at": datetime.now().isoformat()
-        }
+                # Align keys with spec.md output schema
+                report = {
+                    "grant_id": grant["id"],
+                    "grant_title": grant["title"],
+                    "npo_profile_id": str(npo["id"]),
+                    "npo_name": npo["name"],
+                    "match_score": total_score,
+                    "status": status,
+                    "stage1_results": stage1,
+                    "stage2_results": stage2,
+                    "stage3_results": stage3,
+                    "evaluated_at": datetime.now().isoformat()
+                }
 
-        self._upsert_alert(org_id, grant["id"], grant["title"], total_score, report)
+                self._upsert_alert(org_id, grant["id"], grant["title"], total_score, report)
 
         return report
 
