@@ -13,7 +13,7 @@ description: 助成金の公募要領・細則・Q&Aから確定的パース（�
 
 ## 付属スクリプト
 
-### `scripts/validate_expenses.py`
+### `scripts/validate_expenses.py` 📋 実装予定
 経費ルールと団体希望優先度の照合・最適配分を実行する CLI スクリプト。
 
 #### 実行方法

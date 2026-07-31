@@ -55,7 +55,7 @@ uv run skills/jgrants_search/scripts/search_jgrants.py --area "全国" --rate-10
 | `--advance-payment` | `flag` | 概算払い・前払い記載のあるものに絞り込む | `--advance-payment` |
 | `--min-amount` | `int` | 助成上限額の下限 (円) | `--min-amount 1000000` |
 | `--max-amount` | `int` | 助成上限額の上限 (円) | `--max-amount 50000000` |
-| `--org-id` | `string` | 登録団体 ID (指定した団体の要件・活動・提出書類と自動照合) | `--org-id "org-uuid-1234"` |
+
 | `--limit` | `int` | 出力件数の上限 (デフォルト: 10) | `--limit 10` |
 | `--json` | `flag` | JSON 形式で標準出力 | `--json` |
 
@@ -86,10 +86,8 @@ jGrants API の仕様上、`keyword` パラメータが未指定の場合は 0 �
 3. **前払い判定**: 正規表現 `r"概算払"`, `r"前払"`, `r"前金"`, `r"事前交付"`
 4. **金額判定**: `subsidy_max_limit` のパース値比較
 
-### Phase 3.5: 団体プロファイル照合 ＆ 17項目適合チェック (`--org-id` 指定時)
-1. **Stage 1 (確定要件判定)**: 法人格一致 (`organization_type`)・活動年数 (`establishment_year`)・活動エリア・予算規模を 0/1 チェック。
-2. **Stage 2 (必要書類突合)**: 助成金の `required_documents` と団体の `prepared_documents` を集合比較し、不足書類を差分抽出。
-3. **Stage 3 (LLM根拠抽出)**: 活動分野・目的の適合性を公募要領テキストの引用句 (`evidence_quote`) 付きで評価し、適合度スコア (0〜100%) を算出。
+### Phase 3.5: 団体プロファイル照合 ＆ 17項目適合チェック
+> **📋 本機能は [grant_eligibility_checker](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_eligibility_checker/SKILL.md) スキルに委譲しています。** 検索結果に対して団体適合チェックを行う場合は、検索後に `check_eligibility.py --org-id ... --grant-id ...` を実行してください。
 
 ### Phase 4: DB 保存 (`public.grants`) & Office 連携
 * **DB マッピング**: `source_grant_id`, `title`, `provider`, `amount_min`, `amount_max`, `deadline`, `details_url`, `target_area`, `is_rate_10_10`, `is_advance_payment`, `eligible_org_types`, `min_years_active`, `required_documents`, `detail_text`, `payload_json` へ書き込み。

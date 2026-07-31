@@ -34,3 +34,15 @@ openapi.json
 *.njsproj
 *.sln
 *.sw?
+
+# uv lock
+uv.lock
+
+# スクリプト実行出力物
+.output/
+.cache/
+grants_national_*.csv
+grants_national_*.json
+grants_national_*.xlsx
+grants_national_*.docx
+report.md

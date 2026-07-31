@@ -115,7 +115,7 @@ async def run_search(keyword: str, area: str, rate_10_10: bool, advance_payment:
                     break
             if len(results) >= limit:
                 break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.1)  # TODO: 本番化時は http_resilience_client の指数バックオフに置換
 
         if output_json:
             print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -140,7 +140,7 @@ def main():
     parser.add_argument("--advance-payment", action="store_true", help="概算払い・前払い記載のあるものに絞り込む")
     parser.add_argument("--min-amount", type=int, default=None, help="助成上限額の下限 (円)")
     parser.add_argument("--max-amount", type=int, default=None, help="助成上限額の上限 (円)")
-    parser.add_argument("--org-id", type=str, default="", help="登録団体 ID (指定した団体の要件・活動・提出書類と自動照合)")
+
     parser.add_argument("--limit", type=int, default=10, help="表示件数の上限")
     parser.add_argument("--json", action="store_true", help="JSON 形式で結果を出力")
 

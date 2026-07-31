@@ -304,6 +304,10 @@ CREATE TABLE public.npo_expense_preferences (
 
 CREATE INDEX idx_npo_expense_pref_profile ON public.npo_expense_preferences(npo_profile_id);
 
+CREATE TRIGGER set_npo_expense_pref_updated_at
+BEFORE UPDATE ON public.npo_expense_preferences
+FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+
 -- 適合通知アラート (grant_matching_engine / grant_lifecycle_manager 用)
 CREATE TABLE public.alerts (
   id SERIAL PRIMARY KEY,

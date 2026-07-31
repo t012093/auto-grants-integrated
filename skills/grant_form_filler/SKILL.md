@@ -13,7 +13,7 @@ description: ハーネス検証済みの経費ポートフォリオ・17項目�
 
 ## 付属スクリプト
 
-### `scripts/generate_proposal_docx.py`
+### `scripts/generate_proposal_docx.py` 📋 実装予定
 申請原稿の自動生成と Office ドキュメントへの出力を実行する CLI スクリプト。
 
 #### 実行方法

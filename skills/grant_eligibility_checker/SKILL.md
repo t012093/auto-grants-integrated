@@ -13,7 +13,7 @@ description: 登録団体プロファイル (--org-id) と助成金の公募要�
 
 ## 付属スクリプト
 
-### `scripts/check_eligibility.py`
+### `scripts/check_eligibility.py` 📋 実装予定
 団体 ID と助成金 ID を指定して 17 項目の適合チェックを実行する CLI スクリプト。
 
 #### 実行方法

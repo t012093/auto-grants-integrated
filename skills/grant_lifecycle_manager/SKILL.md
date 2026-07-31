@@ -13,7 +13,7 @@ description: 実効的8軸モデルによる採択勝率予測 (0-100%, A/B/C/D�
 
 ## 付属スクリプト
 
-### `scripts/predict_win_rate.py`
+### `scripts/predict_win_rate.py` 📋 実装予定
 実効的 8 軸モデルによる採択勝率を予測する CLI スクリプト。
 
 #### 実行方法
@@ -28,7 +28,7 @@ uv run skills/grant_lifecycle_manager/scripts/predict_win_rate.py \
   --org-id "org-uuid-1234" --grant-id "g-456" --json
 ```
 
-### `scripts/export_calendar_ics.py`
+### `scripts/export_calendar_ics.py` 📋 実装予定
 公募締切および準備タスクを iCal (`.ics`) 形式でエクスポートする CLI スクリプト。
 
 #### 実行方法

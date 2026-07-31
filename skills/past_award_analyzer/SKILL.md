@@ -13,7 +13,7 @@ description: 対象助成金の過去採択事例データ (public.grant_past_aw
 
 ## 付属スクリプト
 
-### `scripts/analyze_past_awards.py`
+### `scripts/analyze_past_awards.py` 📋 実装予定
 対象助成金 ID を指定して過去採択事例の勝因パターンを分析する CLI スクリプト。
 
 #### 実行方法
