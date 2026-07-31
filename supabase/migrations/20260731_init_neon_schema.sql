@@ -238,11 +238,23 @@ CREATE INDEX IF NOT EXISTS idx_alerts_unread ON public.alerts(is_read) WHERE is_
 
 -- 6. トリガー設定
 DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_profiles_updated_at') THEN
+        CREATE TRIGGER set_profiles_updated_at BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_npo_profiles_updated_at') THEN
         CREATE TRIGGER set_npo_profiles_updated_at BEFORE UPDATE ON public.npo_profiles FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_company_profiles_updated_at') THEN
         CREATE TRIGGER set_company_profiles_updated_at BEFORE UPDATE ON public.company_profiles FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_members_updated_at') THEN
+        CREATE TRIGGER set_members_updated_at BEFORE UPDATE ON public.members FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_projects_updated_at') THEN
+        CREATE TRIGGER set_projects_updated_at BEFORE UPDATE ON public.projects FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_grants_updated_at') THEN
+        CREATE TRIGGER set_grants_updated_at BEFORE UPDATE ON public.grants FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_npo_expense_pref_updated_at') THEN
         CREATE TRIGGER set_npo_expense_pref_updated_at BEFORE UPDATE ON public.npo_expense_preferences FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
