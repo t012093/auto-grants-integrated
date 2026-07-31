@@ -3,17 +3,15 @@ name: grant_eligibility_checker
 description: 登録団体プロファイル (--org-id) と助成金の公募要件を全17項目（法人格・実績年数・対象地域・事業予算・準備書類等）にわたって自動照合し、3段階ハイブリッド判定（確定ルール / 書類突合 / LLM根拠引用）で要件適合性を評価するスキル。
 ---
 
-# 助成金要件適合チェッカー (grant_eligibility_checker)
+# 助成金要件適合判定スキル (grant_eligibility_checker)
 
-## 概要
+## 📌 スキル概要
+登録団体のプロファイルデータ（`public.npo_profiles`）と助成金公募情報（`public.grants`）を対照し、全 17 項目にわたる適合判定を実施。適合度スコア (0-100%) と未準備提出書類の差分を自動出し、適合通知（`public.alerts`）を生成・保存するスキル。
 
-登録団体のプロファイル情報 (`public.npo_profiles`) と助成金の公募要件 (`public.grants`) を全 17 項目にわたって突き合わせ、要件適合性 (Eligibility Clearance) および必要書類の準備状況を全自動で判定します。
+### 適合判定インターフェース
+- **判定スクリプト**: `skills/grant_eligibility_checker/scripts/check_eligibility.py`
+- **ステータス**: `⚠️ 部分実装 (Stage1-2完全対応 / Stage3 LLMスタブ実装)`
 
----
-
-## 付属スクリプト
-
-### `scripts/check_eligibility.py` ✅ 実装済み
 団体 ID と助成金 ID を指定して全 17 項目の 3 段階適合チェックを実行し、Neon DB の `public.alerts` へ自動保存する CLI スクリプト。
 
 #### 実行方法

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Neon Database Migration Script
-Applies 20260731_init_neon_schema.sql to Neon PostgreSQL database.
+Applies 20260731_init_neon_schema.sql to Neon PostgreSQL database safely.
 """
 
 import os
@@ -21,39 +21,46 @@ if not DATABASE_URL:
 
 sql_file_path = Path(__file__).resolve().parent.parent / "supabase" / "migrations" / "20260731_init_neon_schema.sql"
 
+if not sql_file_path.exists():
+    print(f"❌ Error: Migration SQL file not found at {sql_file_path}")
+    sys.exit(1)
+
+
 def main():
     print(f"📡 Connecting to Neon PostgreSQL...")
     try:
-        conn = psycopg.connect(DATABASE_URL, autocommit=True)
-        print("✅ Connection successful.")
-        
-        print(f"📖 Reading SQL migration file: {sql_file_path.name}")
-        with open(sql_file_path, "r", encoding="utf-8") as f:
-            sql_script = f.read()
-
-        with conn.cursor() as cur:
-            print("🚀 Executing DDL migration script...")
-            cur.execute(sql_script)
-            print("✅ All tables, types, indexes, and triggers created successfully!")
+        with psycopg.connect(DATABASE_URL) as conn:
+            print("✅ Connection successful.")
             
-            # Verify tables
-            cur.execute("""
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = 'public'
-                ORDER BY table_name;
-            """)
-            tables = [row[0] for row in cur.fetchall()]
-            print(f"\n📋 Created Public Tables ({len(tables)} tables):")
-            for t in tables:
-                print(f"  - public.{t}")
+            print(f"📖 Reading SQL migration file: {sql_file_path.name}")
+            with open(sql_file_path, "r", encoding="utf-8") as f:
+                sql_script = f.read()
+
+            with conn.cursor() as cur:
+                print("🚀 Executing DDL migration script...")
+                cur.execute(sql_script)
+                print("✅ All tables, types, indexes, and triggers created successfully!")
                 
-        conn.close()
-        print("\n✨ Neon Database setup completed successfully.")
+                # Verify tables
+                cur.execute("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public'
+                    ORDER BY table_name;
+                """)
+                tables = [row[0] for row in cur.fetchall()]
+                print(f"\n📋 Created Public Tables ({len(tables)} tables):")
+                for t in tables:
+                    print(f"  - public.{t}")
+
+            conn.commit()
+            print("\n✨ Neon Database setup completed successfully.")
 
     except Exception as e:
-        print(f"❌ Error applying migration: {e}")
+        print(f"❌ Error applying migration: Migration execution failed (Details hidden for security)")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
+

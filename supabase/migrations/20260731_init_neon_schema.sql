@@ -23,7 +23,7 @@ END $$;
 CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
-  NEW.updated_at = TIMEZONE('utc', NOW());
+  NEW.updated_at = NOW();
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   full_name TEXT NOT NULL DEFAULT '',
   avatar_url TEXT,
   role public.app_user_role NOT NULL DEFAULT 'MEMBER',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- NPOプロファイル
@@ -57,9 +57,11 @@ CREATE TABLE IF NOT EXISTS public.npo_profiles (
   establishment_year INTEGER,
   annual_budget BIGINT,
   prepared_documents TEXT[] DEFAULT '{}'::TEXT[],
-  created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_npo_profiles_owner ON public.npo_profiles(owner_user_id);
 
 -- 企業プロファイル
 CREATE TABLE IF NOT EXISTS public.company_profiles (
@@ -77,9 +79,11 @@ CREATE TABLE IF NOT EXISTS public.company_profiles (
   has_volunteer_leave BOOLEAN NOT NULL DEFAULT false,
   has_matching_gift BOOLEAN NOT NULL DEFAULT false,
   guidelines TEXT NOT NULL DEFAULT '',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_company_profiles_owner ON public.company_profiles(owner_user_id);
 
 -- メンバー
 CREATE TABLE IF NOT EXISTS public.members (
@@ -92,13 +96,17 @@ CREATE TABLE IF NOT EXISTS public.members (
   department TEXT,
   avatar_url TEXT,
   bio TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT chk_members_org_exclusivity CHECK (
     (company_profile_id IS NOT NULL AND npo_profile_id IS NULL) OR
     (company_profile_id IS NULL AND npo_profile_id IS NOT NULL)
   )
 );
+
+CREATE INDEX IF NOT EXISTS idx_members_company ON public.members(company_profile_id);
+CREATE INDEX IF NOT EXISTS idx_members_npo ON public.members(npo_profile_id);
+CREATE INDEX IF NOT EXISTS idx_members_user ON public.members(user_id);
 
 -- プロジェクト
 CREATE TABLE IF NOT EXISTS public.projects (
@@ -110,9 +118,13 @@ CREATE TABLE IF NOT EXISTS public.projects (
   npo_profile_id UUID REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
   company_profile_id UUID REFERENCES public.company_profiles(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'DRAFT',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_projects_created_by ON public.projects(created_by);
+CREATE INDEX IF NOT EXISTS idx_projects_npo ON public.projects(npo_profile_id);
+CREATE INDEX IF NOT EXISTS idx_projects_company ON public.projects(company_profile_id);
 
 -- 5. 助成金・パイプラインテーブル群
 
@@ -163,6 +175,7 @@ CREATE TABLE IF NOT EXISTS public.knowledge_chunks (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_grant ON public.knowledge_chunks(grant_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_embedding_hnsw
 ON public.knowledge_chunks USING hnsw (embedding vector_cosine_ops);
 
@@ -183,6 +196,7 @@ CREATE TABLE IF NOT EXISTS public.grant_past_awards (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_grant_past_awards_grant ON public.grant_past_awards(grant_id);
 CREATE INDEX IF NOT EXISTS idx_grant_past_awards_funder ON public.grant_past_awards(funder_name);
 CREATE INDEX IF NOT EXISTS idx_grant_past_awards_year ON public.grant_past_awards(award_year);
 
@@ -202,8 +216,6 @@ CREATE TABLE IF NOT EXISTS public.grant_expense_rules (
   CONSTRAINT uq_expense_rule UNIQUE (grant_id, category_code)
 );
 
-CREATE INDEX IF NOT EXISTS idx_grant_expense_rules_grant ON public.grant_expense_rules(grant_id);
-
 -- 団体の経費希望優先度 (動的配分 Solver 用)
 CREATE TABLE IF NOT EXISTS public.npo_expense_preferences (
   id SERIAL PRIMARY KEY,
@@ -217,46 +229,46 @@ CREATE TABLE IF NOT EXISTS public.npo_expense_preferences (
   CONSTRAINT uq_npo_expense_pref UNIQUE (npo_profile_id, category_code)
 );
 
-CREATE INDEX IF NOT EXISTS idx_npo_expense_pref_profile ON public.npo_expense_preferences(npo_profile_id);
-
 -- 適合通知アラート (grant_matching_engine / grant_lifecycle_manager 用)
 CREATE TABLE IF NOT EXISTS public.alerts (
   id SERIAL PRIMARY KEY,
-  npo_profile_id UUID REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
-  grant_id INTEGER REFERENCES public.grants(id) ON DELETE CASCADE,
+  npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
+  grant_id INTEGER NOT NULL REFERENCES public.grants(id) ON DELETE CASCADE,
   alert_type TEXT NOT NULL DEFAULT 'ELIGIBILITY_MATCH',
   title TEXT NOT NULL,
   message TEXT NOT NULL,
   match_score INTEGER,
   is_read BOOLEAN DEFAULT FALSE,
   is_notified BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT uq_alerts_npo_grant_type UNIQUE (npo_profile_id, grant_id, alert_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_alerts_npo_profile ON public.alerts(npo_profile_id);
-CREATE INDEX IF NOT EXISTS idx_alerts_unread ON public.alerts(is_read) WHERE is_read = FALSE;
+CREATE INDEX IF NOT EXISTS idx_alerts_unread ON public.alerts(npo_profile_id) WHERE is_read = FALSE;
 
 -- 6. トリガー設定
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_profiles_updated_at') THEN
-        CREATE TRIGGER set_profiles_updated_at BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+        CREATE TRIGGER set_profiles_updated_at BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_npo_profiles_updated_at') THEN
-        CREATE TRIGGER set_npo_profiles_updated_at BEFORE UPDATE ON public.npo_profiles FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+        CREATE TRIGGER set_npo_profiles_updated_at BEFORE UPDATE ON public.npo_profiles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_company_profiles_updated_at') THEN
-        CREATE TRIGGER set_company_profiles_updated_at BEFORE UPDATE ON public.company_profiles FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+        CREATE TRIGGER set_company_profiles_updated_at BEFORE UPDATE ON public.company_profiles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_members_updated_at') THEN
-        CREATE TRIGGER set_members_updated_at BEFORE UPDATE ON public.members FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+        CREATE TRIGGER set_members_updated_at BEFORE UPDATE ON public.members FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_projects_updated_at') THEN
-        CREATE TRIGGER set_projects_updated_at BEFORE UPDATE ON public.projects FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+        CREATE TRIGGER set_projects_updated_at BEFORE UPDATE ON public.projects FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_grants_updated_at') THEN
-        CREATE TRIGGER set_grants_updated_at BEFORE UPDATE ON public.grants FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+        CREATE TRIGGER set_grants_updated_at BEFORE UPDATE ON public.grants FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'set_npo_expense_pref_updated_at') THEN
-        CREATE TRIGGER set_npo_expense_pref_updated_at BEFORE UPDATE ON public.npo_expense_preferences FOR EACH ROW EXECUTE PROCEDURE public.set_updated_at();
+        CREATE TRIGGER set_npo_expense_pref_updated_at BEFORE UPDATE ON public.npo_expense_preferences FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
     END IF;
 END $$;
+

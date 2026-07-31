@@ -2,18 +2,23 @@
 """
 17-Item 3-Tier Hybrid Eligibility Checker
 Scans npo_profiles & grants data from Neon DB, performs full 17-item eligibility evaluation,
-and saves/updates the result in public.alerts.
+and saves/updates the result in public.alerts using PostgreSQL ON CONFLICT.
 """
 
 import os
 import sys
 import json
+import logging
 import argparse
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import psycopg
+import psycopg.rows
 from dotenv import load_dotenv
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # Load .env
 env_path = Path(__file__).resolve().parent.parent.parent.parent / ".env"
@@ -45,7 +50,7 @@ class Stage1RuleEvaluator:
         min_years = grant.get("min_years_active") or 0
         est_year = npo.get("establishment_year")
         current_year = datetime.now().year
-        active_years = (current_year - est_year) if est_year else 99
+        active_years = (current_year - est_year) if est_year else 0
         years_pass = active_years >= min_years
         results["years_active"] = {
             "pass": years_pass,
@@ -57,7 +62,7 @@ class Stage1RuleEvaluator:
         # 3. 対象地域 (target_area)
         grant_area = grant.get("target_area") or "全国"
         npo_loc = npo.get("location") or "全国"
-        area_pass = (grant_area == "全国") or (grant_area in npo_loc) or (npo_loc in grant_area)
+        area_pass = (grant_area == "全国") or (npo_loc == "全国") or (grant_area in npo_loc) or (npo_loc in grant_area)
         results["target_area"] = {
             "pass": area_pass,
             "reason": f"公募エリア '{grant_area}' vs 団体拠点 '{npo_loc}'"
@@ -65,13 +70,13 @@ class Stage1RuleEvaluator:
         if not area_pass:
             all_pass = False
 
-        # 4. 予算規模整合 (budget_ratio)
+        # 4. 予算規模整合 (budget_ratio) - spec.md: 助成上限が年予算の50%以内が適正
         max_amount = grant.get("amount_max") or 0
         annual_budget = npo.get("annual_budget") or 0
         if max_amount > 0 and annual_budget > 0:
             budget_ratio = max_amount / annual_budget
-            budget_pass = budget_ratio <= 1.0  # 助成上限が年予算の100%以下なら適正
-            reason = f"助成上限 {max_amount:,}円 / 前年予算 {annual_budget:,}円 (比率: {budget_ratio*100:.1f}%)"
+            budget_pass = budget_ratio <= 0.50  # spec: <= 50%
+            reason = f"助成上限 {max_amount:,}円 / 前年予算 {annual_budget:,}円 (比率: {budget_ratio*100:.1f}% <= 50%上限)"
         else:
             budget_pass = True
             reason = "予算要件制限なし"
@@ -89,8 +94,14 @@ class Stage1RuleEvaluator:
         deadline_valid = True
         if deadline:
             if isinstance(deadline, str):
-                deadline = datetime.strptime(deadline, "%Y-%m-%d").date()
-            deadline_valid = deadline >= date.today()
+                try:
+                    deadline = datetime.strptime(deadline[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    deadline_valid = True
+            elif isinstance(deadline, datetime):
+                deadline = deadline.date()
+            if isinstance(deadline, date):
+                deadline_valid = deadline >= date.today()
         status_pass = is_open and deadline_valid
         results["grant_status"] = {
             "pass": status_pass,
@@ -107,10 +118,12 @@ class Stage2DocumentMatcher:
 
     @staticmethod
     def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
-        required_docs = set(grant.get("required_documents") or [])
+        raw_required = grant.get("required_documents")
+        required_docs = set(raw_required) if raw_required is not None else set()
         prepared_docs = set(npo.get("prepared_documents") or [])
 
-        if not required_docs:
+        # If required_documents is explicit empty list, no documents are required
+        if raw_required is None:
             required_docs = {"ARTICLES", "FINANCIAL_REPORT", "BOARD_LIST", "REGISTRY_CERTIFICATE"}
 
         missing_docs = list(required_docs - prepared_docs)
@@ -127,7 +140,7 @@ class Stage2DocumentMatcher:
 
 
 class Stage3SemanticEvaluator:
-    """Stage 3: 8-Item Semantic Alignment & Substring Quote Guard"""
+    """Stage 3: 8-Item Semantic Alignment & Substring Quote Guard (Fallback Stub)"""
 
     @staticmethod
     def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
@@ -172,7 +185,7 @@ class Stage3SemanticEvaluator:
 
         # Substring Match Guard Verification
         if detail_text:
-            snippet = detail_text[:60].replace("\n", " ").strip()
+            snippet = detail_text[:60].strip()
             if snippet and snippet in detail_text:
                 matched_quotes.append(snippet)
 
@@ -199,10 +212,17 @@ class EligibilityChecker:
                 if not npo:
                     raise ValueError(f"NPO Profile with ID '{org_id}' not found.")
 
-                cur.execute(
-                    "SELECT * FROM public.grants WHERE id::text = %s OR source_grant_id = %s;",
-                    (grant_id, grant_id)
-                )
+                # Optimize PK index usage for integer ID vs text source_grant_id
+                if grant_id.isdigit():
+                    cur.execute(
+                        "SELECT * FROM public.grants WHERE id = %s OR source_grant_id = %s;",
+                        (int(grant_id), grant_id)
+                    )
+                else:
+                    cur.execute(
+                        "SELECT * FROM public.grants WHERE source_grant_id = %s;",
+                        (grant_id,)
+                    )
                 grant = cur.fetchone()
                 if not grant:
                     raise ValueError(f"Grant with ID '{grant_id}' not found.")
@@ -218,6 +238,7 @@ class EligibilityChecker:
             total_score = int(stage2["score"] * 0.4 + stage3["score"] * 0.6)
             status = "PASS" if total_score >= 70 else "WARNING"
 
+        # Align keys with spec.md output schema
         report = {
             "grant_id": grant["id"],
             "grant_title": grant["title"],
@@ -225,9 +246,9 @@ class EligibilityChecker:
             "npo_name": npo["name"],
             "match_score": total_score,
             "status": status,
-            "stage1_rule_check": stage1,
-            "stage2_document_check": stage2,
-            "stage3_semantic_check": stage3,
+            "stage1_results": stage1,
+            "stage2_results": stage2,
+            "stage3_results": stage3,
             "evaluated_at": datetime.now().isoformat()
         }
 
@@ -236,36 +257,28 @@ class EligibilityChecker:
         return report
 
     def _upsert_alert(self, org_id: str, grant_id: int, title: str, score: int, report: Dict[str, Any]):
-        msg = f"要件適合スコア: {score}% | 未準備書類: {len(report['stage2_document_check']['missing'])}件"
+        msg = f"要件適合スコア: {score}% | 未準備書類: {len(report['stage2_results']['missing'])}件"
         try:
             with psycopg.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
-                    # Check if alert already exists for this org and grant
+                    # True Upsert using PostgreSQL ON CONFLICT
                     cur.execute(
-                        "SELECT id FROM public.alerts WHERE npo_profile_id = %s AND grant_id = %s AND alert_type = 'ELIGIBILITY_MATCH';",
-                        (org_id, grant_id)
+                        """
+                        INSERT INTO public.alerts (npo_profile_id, grant_id, alert_type, title, message, match_score, is_read)
+                        VALUES (%s, %s, %s, %s, %s, %s, false)
+                        ON CONFLICT (npo_profile_id, grant_id, alert_type)
+                        DO UPDATE SET
+                            title = EXCLUDED.title,
+                            message = EXCLUDED.message,
+                            match_score = EXCLUDED.match_score,
+                            is_read = false,
+                            created_at = NOW();
+                        """,
+                        (org_id, grant_id, "ELIGIBILITY_MATCH", f"【適合率 {score}%】{title}", msg, score)
                     )
-                    existing = cur.fetchone()
-                    if existing:
-                        cur.execute(
-                            """
-                            UPDATE public.alerts
-                            SET title = %s, message = %s, match_score = %s, is_read = false, created_at = NOW()
-                            WHERE id = %s;
-                            """,
-                            (f"【適合率 {score}%】{title}", msg, score, existing[0])
-                        )
-                    else:
-                        cur.execute(
-                            """
-                            INSERT INTO public.alerts (npo_profile_id, grant_id, alert_type, title, message, match_score)
-                            VALUES (%s, %s, %s, %s, %s, %s);
-                            """,
-                            (org_id, grant_id, "ELIGIBILITY_MATCH", f"【適合率 {score}%】{title}", msg, score)
-                        )
                 conn.commit()
         except Exception as e:
-            print(f"⚠️ Warning: Could not save alert to DB: {e}", file=sys.stderr)
+            logging.warning(f"Could not save alert to DB: {e}")
 
 
 def main():
@@ -292,17 +305,17 @@ def main():
             print(f" 団体名: {result['npo_name']}")
             print("==================================================")
             print(f" 適合スコア: {result['match_score']}% (ステータス: {result['status']})")
-            print("\n【Stage 1: 確定ルール判定 (5項目)】", "ALL PASS" if result['stage1_rule_check']['all_pass'] else "FAILED")
-            for k, v in result['stage1_rule_check']['details'].items():
+            print("\n【Stage 1: 確定ルール判定 (5項目)】", "ALL PASS" if result['stage1_results']['all_pass'] else "FAILED")
+            for k, v in result['stage1_results']['details'].items():
                 icon = "✅" if v['pass'] else "❌"
                 print(f"  {icon} {k}: {v['reason']}")
 
             print("\n【Stage 2: 提出書類チェック (4項目)】")
-            print(f"  - 準備済み: {', '.join(result['stage2_document_check']['prepared']) or 'なし'}")
-            print(f"  - 未準備: {', '.join(result['stage2_document_check']['missing']) or 'なし'}")
+            print(f"  - 準備済み: {', '.join(result['stage2_results']['prepared']) or 'なし'}")
+            print(f"  - 未準備: {', '.join(result['stage2_results']['missing']) or 'なし'}")
 
-            print("\n【Stage 3: セマンティック適合度 (8項目)】", f"{result['stage3_semantic_check']['score']}%")
-            for k, v in result['stage3_semantic_check']['criteria_scores'].items():
+            print("\n【Stage 3: セマンティック適合度 (8項目)】", f"{result['stage3_results']['score']}%")
+            for k, v in result['stage3_results']['criteria_scores'].items():
                 print(f"  - {k}: {v}点")
             print("==================================================\n")
     except Exception as e:
