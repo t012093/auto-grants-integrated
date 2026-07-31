@@ -12,7 +12,7 @@ import logging
 import argparse
 from datetime import datetime, date
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import psycopg
 import psycopg.rows
 from dotenv import load_dotenv
@@ -336,7 +336,7 @@ class EligibilityChecker:
                         """
                         INSERT INTO public.alerts (npo_profile_id, grant_id, alert_type, title, message, match_score, is_read)
                         VALUES (%s, %s, %s, %s, %s, %s, false)
-                        ON CONFLICT (npo_profile_id, grant_id, alert_type)
+                        ON CONFLICT ON CONSTRAINT uq_alerts_npo_grant_type
                         DO UPDATE SET
                             title = EXCLUDED.title,
                             message = EXCLUDED.message,
@@ -346,6 +346,8 @@ class EligibilityChecker:
                         """,
                         (org_id, grant_id, "ELIGIBILITY_MATCH", f"【適合率 {score}%】{title}", msg, score)
                     )
+
+
                 conn.commit()
         except Exception as e:
             logging.warning(f"Could not save alert to DB: {e}")
