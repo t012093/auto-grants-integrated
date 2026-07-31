@@ -581,7 +581,7 @@ $$ LANGUAGE plpgsql;
 
 ## 4. ボランティア・スキルマッチング仕様 (RAG基盤流用)
 
-助成金RAGで使用している Modal GPU インフラ（Qwen3-Embedding-8B + BgeReranker v2-m3）と Supabase ベクトルストアを再利用し、ボランティアとプロジェクトのスキルマッチングを行います。
+助成金RAGで使用しているローカル Embedding インフラ（bge-base-ja-v1.5 768次元 + bge-reranker-base ONNX）と Supabase ベクトルストアを再利用し、ボランティアとプロジェクトのスキルマッチングを行います。
 
 ### 4.1 ベクトル生成データソースマッピング
 
@@ -797,7 +797,7 @@ CREATE TABLE public.project_impacts (
    * Node.js / エッジ環境においては `@huggingface/transformers` (Transformers.js / WASM / ONNX) を使用し、`bge-small` 等の埋め込みモデルをオフラインで計算。
    * インメモリ WASM データベース `@electric-sql/pglite` 上でローカルベクトル検索をサポート。
 2. **クラウドGPUスケール**:
-   * 大規模セマンティック検索・スキルマッチング・再ランキング処理は Modal GPU Serverless (Qwen3-Embedding / BgeReranker) にフォールバック・オフロードする。
+   * 大規模セマンティック検索・スキルマッチング・再ランキング処理は Modal GPU Serverless (bge-base-ja-v1.5 768次元 / bge-reranker-base) にフォールバック・オフロードする。
 
 ### 6.3 React 19 UI 描画 & カンバン管理仕様
 1. **確定的 Markdown レンダリング**:
