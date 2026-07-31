@@ -411,8 +411,8 @@ def has_matching_keyword_without_negation(
 │  ローカルモード   │  │  クラウドモード               │
 │  ────────────── │  │  ──────────────────────────── │
 │  Transformers.js │  │  Modal GPU Serverless         │
-│  bge-base-ja-v1.5│  │  bge-base-ja-v1.5            │
-│  768 次元        │  │  768 次元                     │
+│  BAAI/bge-m3     │  │  BAAI/bge-m3                 │
+│  1024 次元       │  │  1024 次元                    │
 │  ────────────── │  │  ──────────────────────────── │
 │  → Supabase     │  │  Supabase PostgreSQL + pgvector │
 │    pgvector保存  │  │  本番検索 + RLS               │
@@ -425,7 +425,7 @@ def has_matching_keyword_without_negation(
 |---|---|
 | ライブラリ | `@huggingface/transformers` (`^3.2.4`) |
 | ランタイム | ONNX Runtime (WASM バックエンド) |
-| モデル | `bge-base-ja-v1.5` (768 次元) — 日本語最適化標準モデル |
+| モデル | `BAAI/bge-m3` (1024 次元) — 日本語・多言語最適化標準モデル |
 | データベース | **Supabase (PostgreSQL 15 + pgvector)** |
 | ベクトル検索 | Supabase pgvector HNSW インデックス |
 | 初期化 | Singleton パターン (`getInstance()`) でモデルロードを 1 回のみ実行 |
@@ -461,7 +461,7 @@ class LocalEmbeddingService {
 | 項目 | 仕様 |
 |---|---|
 | プラットフォーム | Modal GPU Serverless |
-| モデル (Dense) | `BAAI/bge-base-ja-v1.5` (768 次元) |
+| モデル (Dense) | `BAAI/bge-m3` (1024 次元) |
 | モデル (Hybrid) | `BAAI/bge-m3` (Dense 1024d + Sparse ベクトル同時生成) — jobflow 検証済み |
 | Reranker | `BAAI/bge-reranker-v2-m3` |
 | データベース | Supabase PostgreSQL 15 + pgvector |
@@ -497,7 +497,7 @@ class HybridEmbeddingService {
 
 ### 4.5 次元数の不一致への対応
 
-ローカル・クラウド共通で 768 次元 (`bge-base-ja-v1.5`) に統一・標準化。
+1. **次元数**: ローカル・クラウド共通で 1024 次元 (`BAAI/bge-m3`) に統一・標準化。
 
 1. **検索時**: 同一モードで生成されたベクトル同士でのみ検索を実行。`embedding_source` カラムでフィルタリング。
 2. **移行時**: ローカルで蓄積したデータは、クラウド接続復旧後にバックグラウンドで再 Embedding (バッチ処理)。
@@ -693,6 +693,6 @@ function GrantKanban({ grants, onStageChange }: {
 ## 7. 制約事項と既知の制限
 
 1. **Camoufox バージョン固定**: `camoufox==0.4.11` と `playwright==1.60.0` はピン留め。Playwright 1.61+ は Camoufox の Juggler プロトコルと非互換。
-2. **Embedding の次元数**: 日本語標準モデル `bge-base-ja-v1.5` (768 次元) に統一。ローカル (ONNX/WASM)・クラウド共通で完全互換。
+2. **Embedding の次元数**: 日本語標準モデル `BAAI/bge-m3` (1024 次元) に統一。ローカル (ONNX/WASM)・クラウド共通で完全互換。
 3. **markdownify の制限**: 複雑なテーブル構造 (colspan/rowspan) は不完全な Markdown に変換される場合がある。その場合は Crawl4AI にフォールバック。
 4. **react-markdown の制限**: HTML の直接レンダリングはデフォルトで無効 (XSS 防止)。`rehype-raw` は意図的に不使用。

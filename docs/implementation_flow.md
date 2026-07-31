@@ -79,10 +79,10 @@ graph TD
 ### Phase 1: ハイブリッド Embedding & セマンティック検索 (Vector Engine)
 
 #### Step 1.1: ローカル Embedding 環境 (`ai/local_embed.ts`)
-* `@huggingface/transformers` (`bge-base-ja-v1.5`, 768次元) の Singleton ローダー実装。生成したベクトルを Supabase pgvector に保存。
+* `@huggingface/transformers` (`BAAI/bge-m3`, 1024次元) の Singleton ローダー実装。生成したベクトルを Supabase pgvector に保存。
 
 #### Step 1.2: クラウド GPU 推論環境 (`ai/cloud_embed.py`)
-* Modal GPU / Local Serverless (`bge-base-ja-v1.5` 768d / `bge-reranker-base`) 呼び出しと `p-limit` (limit=3) リトライ制限。
+* Modal GPU / Local Serverless (`BAAI/bge-m3` 1024d / `bge-reranker-base`) 呼び出しと `p-limit` (limit=3) リトライ制限。
 
 #### Step 1.3: ハイブリッド制御レイヤー (`ai/hybrid_embed.ts`)
 * DB テーブル `grants` へ `embedding_source` (`local`/`cloud`) カラムの追加。

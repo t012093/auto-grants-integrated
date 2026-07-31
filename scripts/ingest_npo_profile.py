@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NPO Profile Vector Ingest Script (ingest_npo_profile.py)
-Fetches npo_profiles from Neon DB, generates 768-dim embeddings for
+Fetches npo_profiles from Neon DB, generates 1024-dim embeddings for
 activity_tags, target_audience, and description using SentenceTransformer in batches,
 and saves them to public.npo_knowledge_chunks using ON CONFLICT safely.
 """
@@ -25,7 +25,7 @@ env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-DEFAULT_MODEL_NAME = "cl-nagoya/sup-simcse-ja-base"
+DEFAULT_MODEL_NAME = "BAAI/bge-m3"
 BATCH_COMMIT_SIZE = 10
 
 

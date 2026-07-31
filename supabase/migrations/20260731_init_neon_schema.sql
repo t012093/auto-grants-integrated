@@ -166,12 +166,13 @@ CREATE INDEX IF NOT EXISTS idx_grants_target_area ON public.grants(target_area);
 CREATE INDEX IF NOT EXISTS idx_grants_amount_max ON public.grants(amount_max);
 CREATE INDEX IF NOT EXISTS idx_grants_payload_json_gin ON public.grants USING GIN (payload_json);
 
--- ベクトル知識チャンク (bge-base-ja-v1.5 768次元)
+-- ベクトル知識チャンク (BAAI/bge-m3 1024次元)
 CREATE TABLE IF NOT EXISTS public.knowledge_chunks (
-  id SERIAL PRIMARY KEY,
-  grant_id INTEGER REFERENCES public.grants(id) ON DELETE CASCADE,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  grant_id INT REFERENCES public.grants(id) ON DELETE CASCADE,
+  chunk_type TEXT NOT NULL,
   content TEXT NOT NULL,
-  embedding vector(768) NOT NULL,
+  embedding vector(1024) NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -247,15 +248,15 @@ CREATE TABLE IF NOT EXISTS public.alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_npo_profile ON public.alerts(npo_profile_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_unread ON public.alerts(npo_profile_id) WHERE is_read = FALSE;
 
--- NPO 側知識チャンク (bge-base-ja-v1.5 768次元)
+-- NPO 側知識チャンク (BAAI/bge-m3 1024次元)
 CREATE TABLE IF NOT EXISTS public.npo_knowledge_chunks (
-  id SERIAL PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
-  chunk_type TEXT NOT NULL, -- 'ACTIVITY_TAGS', 'TARGET_AUDIENCE', 'DESCRIPTION'
+  chunk_type TEXT NOT NULL,
   content TEXT NOT NULL,
-  embedding vector(768) NOT NULL,
+  embedding vector(1024) NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  CONSTRAINT uq_npo_chunk_type UNIQUE (npo_profile_id, chunk_type)
+  CONSTRAINT uq_npo_knowledge_chunks_type UNIQUE (npo_profile_id, chunk_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_npo_knowledge_chunks_embedding_hnsw

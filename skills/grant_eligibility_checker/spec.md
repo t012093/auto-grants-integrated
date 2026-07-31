@@ -28,15 +28,15 @@ uv run skills/grant_eligibility_checker/scripts/check_eligibility.py \
 
 ## 3. テーブル前提仕様 (`public.npo_knowledge_chunks`)
 
-NPO 側のテキスト（活動分野・ターゲット層・団体概要）は、事前に `bge-base-ja-v1.5` (768次元) でベクトル化され、以下のテーブルに格納されている前提とする：
+NPO 側のテキスト（活動分野・ターゲット層・団体概要）は、事前に `BAAI/bge-m3` (1024次元) でベクトル化され、以下のテーブルに格納されている前提とする：
 
 ```sql
 CREATE TABLE IF NOT EXISTS public.npo_knowledge_chunks (
-  id SERIAL PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
   chunk_type TEXT NOT NULL, -- 'ACTIVITY_TAGS', 'TARGET_AUDIENCE', 'DESCRIPTION'
   content TEXT NOT NULL,
-  embedding vector(768) NOT NULL,
+  embedding vector(1024) NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT uq_npo_chunk_type UNIQUE (npo_profile_id, chunk_type)
 );
