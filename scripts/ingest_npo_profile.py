@@ -2,8 +2,8 @@
 """
 NPO Profile Vector Ingest Script (ingest_npo_profile.py)
 Fetches npo_profiles from Neon DB, generates 768-dim embeddings for
-activity_tags, target_audience, and description using SentenceTransformer,
-and saves them to public.npo_knowledge_chunks using ON CONFLICT.
+activity_tags, target_audience, and description using SentenceTransformer in batches,
+and saves them to public.npo_knowledge_chunks using ON CONFLICT safely.
 """
 
 import os
@@ -26,11 +26,11 @@ load_dotenv(dotenv_path=env_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 DEFAULT_MODEL_NAME = "cl-tohoku/bert-base-japanese-v3"
-
+BATCH_COMMIT_SIZE = 10
 
 
 class NPOProfileEmbedder:
-    """Handles text formatting, embedding generation, and DB upsert for NPO profiles."""
+    """Handles text formatting, batch embedding generation, and DB upsert for NPO profiles."""
 
     def __init__(self, db_url: str, model_name: str = DEFAULT_MODEL_NAME):
         self.db_url = db_url
@@ -68,12 +68,15 @@ class NPOProfileEmbedder:
             logging.warning(f"No valid text fields found for NPO ID: {npo_id}")
             return 0
 
-        saved_count = 0
-        for chunk_type, content in chunks:
-            # Generate 768-dim vector
-            vec = self.model.encode(content).tolist()
+        # Batch encode all chunk contents for this NPO (high throughput)
+        chunk_types = [c[0] for c in chunks]
+        contents = [c[1] for c in chunks]
+        embeddings = self.model.encode(contents)
 
+        saved_count = 0
+        for chunk_type, content, vec in zip(chunk_types, contents, embeddings):
             # Upsert into npo_knowledge_chunks
+            # Preserve original created_at on existing records
             cur.execute(
                 """
                 INSERT INTO public.npo_knowledge_chunks (npo_profile_id, chunk_type, content, embedding)
@@ -81,10 +84,9 @@ class NPOProfileEmbedder:
                 ON CONFLICT (npo_profile_id, chunk_type)
                 DO UPDATE SET
                     content = EXCLUDED.content,
-                    embedding = EXCLUDED.embedding,
-                    created_at = NOW();
+                    embedding = EXCLUDED.embedding;
                 """,
-                (npo_id, chunk_type, content, str(vec))
+                (npo_id, chunk_type, content, str(vec.tolist()))
             )
             saved_count += 1
             logging.info(f"  └─ Saved {chunk_type} (length: {len(content)} chars)")
@@ -96,24 +98,37 @@ class NPOProfileEmbedder:
             raise ValueError("Either --org-id or --all must be specified.")
 
         with psycopg.connect(self.db_url, row_factory=psycopg.rows.dict_row) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor() as select_cur, conn.cursor() as dml_cur:
                 if org_id:
-                    cur.execute("SELECT * FROM public.npo_profiles WHERE id = %s;", (org_id,))
-                    npos = cur.fetchall()
+                    select_cur.execute("SELECT * FROM public.npo_profiles WHERE id = %s;", (org_id,))
                 else:
-                    cur.execute("SELECT * FROM public.npo_profiles ORDER BY created_at DESC;")
-                    npos = cur.fetchall()
+                    select_cur.execute("SELECT * FROM public.npo_profiles ORDER BY created_at DESC;")
 
-                if not npos:
+                processed_count = 0
+                total_chunks = 0
+
+                while True:
+                    rows = select_cur.fetchmany(100)
+                    if not rows:
+                        break
+
+                    for npo in rows:
+                        total_chunks += self.process_npo(npo, dml_cur)
+                        processed_count += 1
+
+                        # Periodic commit per batch for transaction safety
+                        if processed_count % BATCH_COMMIT_SIZE == 0:
+                            conn.commit()
+                            logging.debug(f"Committed transaction batch at {processed_count} NPOs.")
+
+                conn.commit()
+
+                if processed_count == 0:
                     logging.warning("No NPO profiles found to process.")
                     return
 
-                total_chunks = 0
-                for npo in npos:
-                    total_chunks += self.process_npo(npo, cur)
+                logging.info(f"✨ Completed! Processed {processed_count} NPO profiles, saved {total_chunks} vector chunks.")
 
-            conn.commit()
-            logging.info(f"✨ Completed! Processed {len(npos)} NPO profiles, saved {total_chunks} vector chunks.")
 
 
 def main():
