@@ -18,7 +18,7 @@ graph TD
     P0_2["Step 0.2: 収集エンジン (httpx + Crawl4AI × Camoufox)"]
     P0_3["Step 0.3: 確定的抽出 (JsonCss/markdownify) & 正規化"]
     
-    P1_1["Step 1.1: ローカル Embedding (Transformers.js + PGlite)"]
+    P1_1["Step 1.1: ローカル Embedding 生成 (Transformers.js ONNX/WASM)"]
     P1_2["Step 1.2: クラウド Modal GPU (Qwen3/BGE-M3) 連携"]
     
     P2_1["Step 2.1: officecli Pre-Flight 解析 & field_map 生成"]
@@ -79,8 +79,7 @@ graph TD
 ### Phase 1: ハイブリッド Embedding & セマンティック検索 (Vector Engine)
 
 #### Step 1.1: ローカル Embedding 環境 (`ai/local_embed.ts`)
-* `@huggingface/transformers` (`Xenova/multilingual-e5-small`, INT8) の Singleton ローダー実装。
-* `@electric-sql/pglite` (WASM PostgreSQL + pgvector) のローカルベクトルインデックス構築。
+* `@huggingface/transformers` (`bge-base-ja-v1.5`, 768次元) の Singleton ローダー実装。生成したベクトルを Supabase pgvector に保存。
 
 #### Step 1.2: クラウド GPU 推論環境 (`ai/cloud_embed.py`)
 * Modal GPU / Local Serverless (`bge-base-ja-v1.5` 768d / `bge-reranker-base`) 呼び出しと `p-limit` (limit=3) リトライ制限。
@@ -139,7 +138,7 @@ graph TD
 | マイルストーン | 対象フェーズ | 完了定義・検証項目 |
 |---|---|---|
 | **M0: 確定的インジェスト完了** | Phase 0 | 優先度 S/A の 10 情報源からハルシネーション 0% で全項目が確定抽出できること |
-| **M1: ベクトル検索稼働** | Phase 1 | ローカル PGlite と Modal GPU の双方で類似度検索が正常動作すること |
+| **M1: ベクトル検索稼働** | Phase 1 | ローカル ONNX Embedding 生成 → Supabase pgvector で類似度検索が正常動作すること |
 | **M2: 申請書記入エンジン完成** | Phase 2 | エクセル神エクセル・Word 枠の申請書がレイアウト崩れなしに 100% 確定記入できること |
 | **M3: フロントエンド連携完了** | Phase 3 | 確定的 Markdown 表示と DND カンバンボードの Optimistic UI が動作すること |
 | **M4: MCP 統合 & E2E 自動化** | Phase 4 | 助成金探索から申請書 PDF 生成までの全自動シームレスパイプラインの動作確認 |

@@ -796,12 +796,13 @@ CREATE TABLE public.project_impacts (
    * **JsonCss / markdownify**: 一覧画面（SERP）および確定フォーマットのページは、CSS セレクターおよび `markdownify` によりコードレベルで確定的に抽出し、LLM を経由させない（ハルシネーション確率 0%）。
    * **Crawl4AIExtractor (フォールバック)**: 未知・非構造化ページのみ、Pydantic スキーマ制御で LLM に限定抽出を依頼し、失敗時は正規表現・ルールベースで自動復旧。
 
-### 6.2 ローカル & クラウドのハイブリッド Embedding 仕様
-1. **ローカル / オンデバイス推論**:
-   * Node.js / エッジ環境においては `@huggingface/transformers` (Transformers.js / WASM / ONNX) を使用し、`bge-small` 等の埋め込みモデルをオフラインで計算。
-   * インメモリ WASM データベース `@electric-sql/pglite` 上でローカルベクトル検索をサポート。
-2. **クラウドGPUスケール**:
-   * 大規模セマンティック検索・スキルマッチング・再ランキング処理は Modal GPU Serverless (bge-base-ja-v1.5 768次元 / bge-reranker-base) にフォールバック・オフロードする。
+### 6.2 Embedding & ベクトル検索仕様 (Supabase pgvector 統一)
+1. **ローカル Embedding 生成**:
+   * `@huggingface/transformers` (ONNX/WASM) を使用し、`bge-base-ja-v1.5` (768 次元) でローカルにベクトルを生成。
+   * 生成したベクトルは **Supabase (PostgreSQL 15 + pgvector)** の `public.knowledge_chunks` テーブルに INSERT。
+2. **ベクトル検索**:
+   * Supabase pgvector HNSW インデックスによるコサイン類似度検索。
+   * BM25 (`pg_trgm`) とのハイブリッド RRF 検索 + `bge-reranker-base` (ONNX) 二次リランク。
 
 ### 6.3 React 19 UI 描画 & カンバン管理仕様
 1. **確定的 Markdown レンダリング**:

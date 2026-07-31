@@ -15,7 +15,7 @@
 |---|---|---|
 | クローリング | Playwright + httpx | **Camoufox (Stealth Firefox)** + Crawl4AI + Playwright + httpx + feedparser |
 | データ抽出 | LLM 依存の構造化抽出 | **確定的パース (JsonCss / markdownify) 最優先** → LLM フォールバック |
-| Embedding | Modal GPU (Qwen3) のみ | **ローカル (Transformers.js / PGlite)** + Modal GPU ハイブリッド |
+| Embedding | Modal GPU (Qwen3) のみ | **ローカル (Transformers.js ONNX/WASM)** → Supabase pgvector 保存 |
 | UI 表示 | 独自コンポーネント | **react-markdown** + **@hello-pangea/dnd** カンバン |
 
 ---
@@ -414,8 +414,8 @@ def has_matching_keyword_without_negation(
 │  bge-base-ja-v1.5│  │  bge-base-ja-v1.5            │
 │  768 次元        │  │  768 次元                     │
 │  ────────────── │  │  ──────────────────────────── │
-│  PGlite (WASM)  │  │  PostgreSQL + pgvector        │
-│  ローカル検索    │  │  本番検索 + RLS               │
+│  → Supabase     │  │  Supabase PostgreSQL + pgvector │
+│    pgvector保存  │  │  本番検索 + RLS               │
 └─────────────────┘  └──────────────────────────────┘
 ```
 
@@ -425,12 +425,11 @@ def has_matching_keyword_without_negation(
 |---|---|
 | ライブラリ | `@huggingface/transformers` (`^3.2.4`) |
 | ランタイム | ONNX Runtime (WASM バックエンド) |
-| モデル (候補 1) | `Xenova/multilingual-e5-small` (INT8 量子化, ~60MB, 384 次元) — jobflow 検証済み |
-| モデル (候補 2) | `BAAI/bge-small-en-v1.5` (384 次元, 33M params) |
-| データベース | `@electric-sql/pglite` (WASM PostgreSQL) |
-| ベクトル検索 | PGlite 内蔵 pgvector 拡張 |
+| モデル | `bge-base-ja-v1.5` (768 次元) — 日本語最適化標準モデル |
+| データベース | **Supabase (PostgreSQL 15 + pgvector)** |
+| ベクトル検索 | Supabase pgvector HNSW インデックス |
 | 初期化 | Singleton パターン (`getInstance()`) でモデルロードを 1 回のみ実行 |
-| 用途 | ローカル開発・オフライン環境・クライアントサイド検索 |
+| 用途 | ローカルで Embedding 生成 → Supabase pgvector に INSERT |
 
 ```typescript
 // ローカル Embedding サービス (Node.js / Edge)
@@ -684,7 +683,7 @@ function GrantKanban({ grants, onStageChange }: {
 | パッケージ | バージョン | 用途 |
 |---|---|---|
 | `@huggingface/transformers` | `^3.2.4` | ローカル Embedding (ONNX/WASM) |
-| `@electric-sql/pglite` | `^0.2.14` | ローカル WASM PostgreSQL |
+| `@supabase/supabase-js` | `^2.x` | Supabase クライアント (Auth / pgvector / Realtime) |
 | `react-markdown` | `^10.1.0` | Markdown の VDOM 表示 |
 | `remark-gfm` | `^4.0.0` | GFM サポート |
 | `@hello-pangea/dnd` | `^17.0.0` | カンバン DND |
