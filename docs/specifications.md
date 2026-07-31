@@ -382,6 +382,36 @@ CREATE POLICY nodes_read_policy ON public.nodes FOR SELECT USING (true);
 CREATE POLICY edges_read_policy ON public.edges FOR SELECT USING (true);
 CREATE POLICY data_sources_read_policy ON public.data_sources FOR SELECT USING (true);
 
+-- 新規4テーブル RLS 有効化
+ALTER TABLE public.grant_past_awards ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.grant_expense_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.npo_expense_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.alerts ENABLE ROW LEVEL SECURITY;
+
+-- 全ユーザーが SELECT 可能 (書き込みは service_role のみ)
+CREATE POLICY grant_past_awards_read_policy ON public.grant_past_awards FOR SELECT USING (true);
+CREATE POLICY grant_expense_rules_read_policy ON public.grant_expense_rules FOR SELECT USING (true);
+
+-- npo_expense_preferences: 自団体の優先度のみ読み書き可能
+CREATE POLICY npo_expense_pref_owner_read ON public.npo_expense_preferences
+  FOR SELECT USING (
+    npo_profile_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+  );
+CREATE POLICY npo_expense_pref_owner_write ON public.npo_expense_preferences
+  FOR ALL USING (
+    npo_profile_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+  );
+
+-- alerts: 自団体向けアラートのみ閲覧可能
+CREATE POLICY alerts_owner_read ON public.alerts
+  FOR SELECT USING (
+    npo_profile_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+  );
+CREATE POLICY alerts_owner_update ON public.alerts
+  FOR UPDATE USING (
+    npo_profile_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+  );
+
 -- ※ INSERT/UPDATE/DELETE に関するポリシーは定義しません。
 --    これにより、Supabase 上の一般ユーザー (authenticated/anon) からの書き込みはすべてブロックされ、
 --    RLSをバイパスする service_role キーを用いたバックエンドバッチ処理からのみ書き込み可能となります。
