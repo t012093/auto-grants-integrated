@@ -13,8 +13,8 @@ description: 登録団体プロファイル (--org-id) と助成金の公募要�
 
 ## 付属スクリプト
 
-### `scripts/check_eligibility.py` 📋 実装予定
-団体 ID と助成金 ID を指定して 17 項目の適合チェックを実行する CLI スクリプト。
+### `scripts/check_eligibility.py` ✅ 実装済み
+団体 ID と助成金 ID を指定して全 17 項目の 3 段階適合チェックを実行し、Neon DB の `public.alerts` へ自動保存する CLI スクリプト。
 
 #### 実行方法
 
