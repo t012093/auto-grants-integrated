@@ -36,7 +36,7 @@ flowchart TD
         S1 & S2 & S3 --> Harness[Harness Guard / 算術検算]
         Harness -->|officecli batch| OfficeOut["Office ドキュメント (.xlsx / .docx)"]
         Harness -->|iCal エクスポート| CalendarOut["カレンダー同期 (.ics)"]
-        Harness -->|PostgreSQL| AlertOut["DB alerts & Webhook 通知"]
+        Harness -->|Neon DB| AlertOut["DB alerts & Webhook 通知"]
     end
 ```
 
