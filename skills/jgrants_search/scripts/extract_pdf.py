@@ -19,6 +19,7 @@ import fitz  # PyMuPDF
 import httpx
 import psycopg
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
 # ログ設定
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -26,6 +27,7 @@ logger = logging.getLogger("extract_pdf")
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
+DEFAULT_MODEL_NAME = "BAAI/bge-m3"
 
 # 標準書類マスター Enum 定義
 STANDARD_DOC_MASTERS = {
@@ -48,8 +50,19 @@ EXPENSE_PATTERNS = {
 
 
 class PDFExtractor:
-    def __init__(self, db_url: Optional[str] = None):
+    def __init__(self, db_url: Optional[str] = None, model_name: str = DEFAULT_MODEL_NAME):
         self.db_url = db_url or DATABASE_URL
+        self.model_name = model_name
+        self._model = None
+
+    @property
+    def model(self) -> SentenceTransformer:
+        """遅延ロード: embedding 生成時に初めてモデルをロード"""
+        if self._model is None:
+            logger.info(f"Loading embedding model: {self.model_name}...")
+            self._model = SentenceTransformer(self.model_name)
+            logger.info("Model loaded successfully.")
+        return self._model
 
     def extract_text_from_pdf(self, pdf_bytes: bytes) -> Tuple[str, bool]:
         """
@@ -103,7 +116,7 @@ class PDFExtractor:
 
             is_disallowed = False
             for p in patterns:
-                disallow_pattern = rf"{p}.*?(対象外|不可|計上できない|認められない)"
+                disallow_pattern = rf"{p}[^。]*?(対象外|不可|計上できない|認められない)"
                 if re.search(disallow_pattern, flat_text):
                     is_disallowed = True
                     break
@@ -136,21 +149,17 @@ class PDFExtractor:
         req_docs = self.extract_required_documents_deterministic(text)
         expense_rules = self.extract_expense_rules_deterministic(text)
 
-        criteria_snippet = ""
+        criteria_snippet = None
         criteria_match = re.search(r"(審査基準|評価項目|選定基準|評価のポイント)[\s\S]{1,500}", text)
         if criteria_match:
             criteria_snippet = criteria_match.group(0)[:300].strip()
-        else:
-            criteria_snippet = "地域課題の解決、事業の実現可能性、継続性および地域波及効果を総合的に評価します。"
 
-        intent_snippet = ""
+        intent_snippet = None
         intent_match = re.search(r"(目的|趣旨|概要|背景)[\s\S]{1,300}", text)
         if intent_match:
             intent_snippet = intent_match.group(0)[:200].strip()
-        else:
-            intent_snippet = text[:200].strip() if text else "地域社会の課題解決および市民活動の推進を目的とします。"
 
-        period_str = "12ヶ月間 (4月〜翌3月)"
+        period_str = None
         period_match = re.search(r"(令和\d+年\d+月\d+日|20\d{2}年\d+月\d+日)\s*[〜～\-]\s*(令和\d+年\d+月\d+日|20\d{2}年\d+月\d+日)", text)
         if period_match:
             period_str = period_match.group(0)
@@ -160,7 +169,14 @@ class PDFExtractor:
             "funder_intent": intent_snippet,
             "project_period": period_str,
             "expense_rules": expense_rules,
-            "required_documents": req_docs
+            "required_documents": req_docs,
+            "extraction_coverage": {
+                "evaluation_criteria": criteria_snippet is not None,
+                "funder_intent": intent_snippet is not None,
+                "project_period": period_str is not None,
+                "required_documents": len(req_docs) > 0,
+                "expense_rules": len(expense_rules) > 0,
+            }
         }
 
     async def fetch_pdf_from_url(self, url: str) -> bytes:
@@ -170,33 +186,58 @@ class PDFExtractor:
             resp.raise_for_status()
             return resp.content
 
-    def save_knowledge_chunks(self, cur: Any, grant_id: int, text: str):
-        """テキストを 500 文字単位で分割して knowledge_chunks に登録"""
-        cur.execute("DELETE FROM public.knowledge_chunks WHERE grant_id = %s;", (grant_id,))
-        chunks = [text[i:i+500] for i in range(0, len(text), 450)]
-        zero_embedding = f"[{','.join(['0.0']*1024)}]"
-        for idx, chunk in enumerate(chunks[:20]):
-            chunk_type = "GENERAL_REQUIREMENT"
-            if "審査" in chunk or "評価" in chunk:
-                chunk_type = "EVALUATION_CRITERIA"
-            elif "経費" in chunk or "対象外" in chunk:
-                chunk_type = "EXPENSE_RULE"
+    @staticmethod
+    def _classify_chunk_type(chunk: str) -> str:
+        """チャンクの内容からタイプを決定論的に分類"""
+        if "審査" in chunk or "評価" in chunk:
+            return "EVALUATION_CRITERIA"
+        elif "経費" in chunk or "対象外" in chunk:
+            return "EXPENSE_RULE"
+        return "GENERAL_REQUIREMENT"
 
+    def save_knowledge_chunks(self, cur: Any, grant_id: int, text: str):
+        """テキストを 500 文字単位で分割し、BGE-M3 で embedding 生成して knowledge_chunks に登録"""
+        cur.execute("DELETE FROM public.knowledge_chunks WHERE grant_id = %s;", (grant_id,))
+
+        CHUNK_SIZE = 500
+        STEP = 450  # 50文字オーバーラップ
+        chunks = [text[i:i+CHUNK_SIZE] for i in range(0, len(text), STEP)]
+
+        if not chunks:
+            return
+
+        # BGE-M3 でバッチ embedding 生成
+        embeddings = self.model.encode(chunks, normalize_embeddings=True)
+
+        for idx, (chunk, vec) in enumerate(zip(chunks, embeddings)):
+            chunk_type = self._classify_chunk_type(chunk)
             cur.execute(
                 """
                 INSERT INTO public.knowledge_chunks (grant_id, chunk_type, content, embedding)
                 VALUES (%s, %s, %s, %s::vector);
                 """,
-                (grant_id, chunk_type, chunk, zero_embedding)
+                (grant_id, chunk_type, chunk, str(vec.tolist()))
             )
+        logger.info(f"Saved {len(chunks)} knowledge chunks for grant_id={grant_id}")
 
     def process_pdf(self, grant_id: int, pdf_bytes: bytes, pdf_name: str = "guideline.pdf") -> Dict[str, Any]:
         """
         PDF の解読・確定要件抽出・DB保存の一連の統合パイプライン
         """
         extracted_text, is_ocr_needed = self.extract_text_from_pdf(pdf_bytes)
+
+        # Guard Clause: 画像化 PDF はテキスト抽出不可のため DB 書き込みをスキップ
         if is_ocr_needed:
-            logger.warning(f"PDF {pdf_name} has very little text (<100 chars). Fallback to OCR mode.")
+            logger.warning(f"PDF {pdf_name}: テキスト抽出量 {len(extracted_text)} 文字 (<100)。"
+                           f"画像化PDFと判定。DB書き込みをスキップ。")
+            return {
+                "status": "ocr_required",
+                "grant_id": grant_id,
+                "extracted_text_len": len(extracted_text),
+                "is_ocr_needed": True,
+                "requirements": None,
+                "message": "画像化PDFのためテキスト抽出不可。OCRパイプラインへの委譲が必要です。"
+            }
 
         reqs = self.extract_structured_requirements(extracted_text)
 
@@ -314,15 +355,19 @@ async def main_async():
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result.get("status") == "ocr_required":
+        print(f"\n⚠️  {result.get('message')}")
+        print(f"抽出文字数: {result.get('extracted_text_len')} 文字")
     else:
         print("\n=== PDF パース ＆ 要件抽出結果 ===")
         print(f"助成金 ID: {result.get('grant_id')}")
         print(f"抽出文字数: {result.get('extracted_text_len')} 文字")
-        reqs = result.get("requirements", {})
+        reqs = result.get("requirements") or {}
         print(f"提出必須書類マスター: {reqs.get('required_documents')}")
         print(f"対象経費ルール数: {len(reqs.get('expense_rules', []))}")
-        print(f"事業期間: {reqs.get('project_period')}")
-        print(f"審査基準スニペット: {reqs.get('evaluation_criteria')[:100]}...\n")
+        print(f"事業期間: {reqs.get('project_period', '（未抽出）')}")
+        criteria = reqs.get('evaluation_criteria')
+        print(f"審査基準スニペット: {criteria[:100] if criteria else '（PDF内に記載なし）'}\n")
 
 
 def main():
