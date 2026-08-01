@@ -27,7 +27,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 JGRANTS_LIST_API = "https://api.jgrants-portal.go.jp/exp/v1/public/subsidies"
 JGRANTS_DETAIL_API = "https://api.jgrants-portal.go.jp/exp/v1/public/subsidies/id"
 
-RATE_10_10_PATTERNS = [r"10/10", r"10分の10", r"１０／１０", r"１０分の１0", r"定額", r"全額補助", r"100%"]
+RATE_10_10_PATTERNS = [r"10/10", r"10分の10", r"１０／１０", r"１０分の１０", r"定額", r"全額補助", r"100%"]
 ADVANCE_PATTERNS = [r"概算払", r"前払", r"前金", r"事前交付"]
 
 
@@ -187,7 +187,7 @@ def save_grants_to_db(grants_data: list[dict]) -> int:
         print(f"[DB] Successfully upserted {saved_count} grants to public.grants.")
         return saved_count
     except Exception as e:
-        print(f"[ERROR] Failed to save grants to DB: {e}")
+        print(f"[ERROR] Failed to save grants to DB after {saved_count} items: {e}")
         return 0
 
 
