@@ -15,10 +15,10 @@ flowchart TD
         DeterministicParser --> RuleDB[("経費ルール & 17項目条件 DB<br/>(public.grants / grant_expense_rules)")]
     end
 
-    %% 2. 768次元 ローカル RAG エンジン
-    subgraph LocalRAG ["2. 768次元 ローカル RAG パイプライン"]
+    %% 2. 1024次元 ローカル RAG エンジン
+    subgraph LocalRAG ["2. 1024次元 ローカル RAG パイプライン"]
         RuleDB -->|detail_text 全文を500文字単位で分割| Chunking[チャンク分割 50文字オーバーラップ]
-        Chunking --> Embedder["bge-base-ja-v1.5 (768次元)"]
+        Chunking --> Embedder["BAAI/bge-m3 (1024次元)"]
         Embedder --> VectorDB[("public.knowledge_chunks<br/>(pgvector HNSW)")]
     end
 
@@ -118,11 +118,11 @@ skills/
 ## 4. ベクトル埋め込み & ハイブリッド RAG 検索 (`embedding_rag_engine`)
 
 ### 目的
-助成金の本文テキスト (`detail_text`) を 768 次元ベクトルに変換し、意味検索とキーワード検索のハイブリッドで高精度な情報取得を実現します。
+助成金の本文テキスト (`detail_text`) を 1024 次元ベクトルに変換し、意味検索とキーワード検索のハイブリッドで高精度な情報取得を実現します。
 
 ### 仕様
-* **テキスト分割**: 全文を 500 文字（オーバーラップ 50 文字）のチャンクに自動分割。本文が 500 文字を超えても全量がノーカットで保持されます。
-* **埋め込みモデル**: **`bge-base-ja-v1.5`**（日本語標準 768 次元ベクトル `vector(768)`）
+* **埋め込みモデル**: **`BAAI/bge-m3`**（日本語・多言語標準 1024 次元ベクトル `vector(1024)`）
+* **チャンク長**: 最大 8,192 トークン対応（オーバーラップ 100 トークン）。
 * **実行環境**: `fastembed` / `@huggingface/transformers`（ローカル / WASM 完結）
 * **ハイブリッド検索構成**:
   1. **一次絞り込み (BM25 + pgvector)**: 完全一致キーワード (`pg_trgm`) とコサイン類似度 (`vector_cosine_ops`) を RRF (Reciprocal Rank Fusion) でスコア統合して上位 20 件を抽出。

@@ -13,8 +13,9 @@ description: 助成金の公募要領・細則・Q&Aから確定的パース（�
 
 ## 付属スクリプト
 
-### `scripts/validate_expenses.py` 📋 実装予定
-経費ルールと団体希望優先度の照合・最適配分を実行する CLI スクリプト。
+### `scripts/validate_expenses.py` ✅ 実装済み
+経費ルールと団体希望優先度の照合・自動振替提案・最適配分を実行する CLI スクリプト。
+
 
 #### 実行方法
 
@@ -22,10 +23,6 @@ description: 助成金の公募要領・細則・Q&Aから確定的パース（�
 # 団体の希望優先度と助成金ルールから最適経費ポートフォリオを生成
 uv run skills/grant_expense_validator/scripts/validate_expenses.py \
   --org-id "org-uuid-1234" --grant-id "g-456"
-
-# 手動入力の経費案をルールチェック（レガシー: 事後チェックモード）
-uv run skills/grant_expense_validator/scripts/validate_expenses.py \
-  --grant-id "g-456" --input-budget "budget.json"
 
 # JSON 形式で結果出力
 uv run skills/grant_expense_validator/scripts/validate_expenses.py \
@@ -40,7 +37,7 @@ uv run skills/grant_expense_validator/scripts/validate_expenses.py \
 |---|---|---|---|
 | `--org-id` | `string` | 登録団体 UUID（希望優先度から動的配分を実行） | `--org-id "org-uuid-1234"` |
 | `--grant-id` | `string` | 対象助成金 ID | `--grant-id "g-456"` |
-| `--input-budget` | `string` | 手動入力の経費案 JSON ファイルパス（事後チェック用） | `--input-budget "budget.json"` |
+
 | `--json` | `flag` | JSON 形式で結果出力 | `--json` |
 
 ---

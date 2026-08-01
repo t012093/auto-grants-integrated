@@ -41,7 +41,7 @@ graph TD
         PG[("PostgreSQL 15 + pgvector<br>(助成金・予算・投票・ボランティア・ZKPデータ)")]
         LocalEmbed["ローカル Embedding 生成器<br/>(@huggingface/transformers ONNX/WASM)"]
         Realtime["Supabase Realtime Engine<br>(クラファン決済・応募の即時通知)"]
-        ModalGPU["Modal GPU / Local Serverless<br/>(bge-base-ja-v1.5 768d / ONNX Reranker)"]
+        ModalGPU["Modal GPU / Local Serverless<br/>(BAAI/bge-m3 1024d / ONNX Reranker)"]
         GraphRAG["GraphRAG (政策・施策構造化)"]
         
         QGate -- 合格/登録 --> PG
@@ -168,7 +168,7 @@ graph TD
 |---|---|---|
 | **Info_Sources** (情報源) | 助成金・予算・行政文書・市民合意の原データ | jGrants API、民間財団Web/DOM、自治体RSS、行政文書PDF/Word、RFP、市民投票データ、団体実績を包含。 |
 | **Ingest_Pipeline** (インジェスト・正規化) | 収集・正規化・品質検証 | コレクター群（jGrants API / Tree Crawler / **Camoufox (Stealth Firefox)** / Playwright / RSS Watcher）。**JsonCss / markdownify による確定的なパース (ハルシネーション0%)** を第一系列とし、必要に応じて **Crawl4AI** および Document Normalizer → クオリティゲート（Coverage ≧ 0.95）。失敗時のみ LLM スキーマ指定フォールバックで自動復旧。 |
-| **Data_Store_Knowledge** (データストア & ナレッジ化) | 永続化・ベクトル化・構造化・リアルタイム配信 | **Neon (PostgreSQL 15+ with pgvector)** に全テーブルを一元管理。GraphRAG で政策・施策を知識グラフ化。**@huggingface/transformers (ONNX/WASM)** によるローカル Embedding 生成（**bge-base-ja-v1.5 768次元**）→ Neon pgvector に保存。BM25 + pgvector RRF + **bge-reranker-base (ONNX)** 二次リランク。 |
+| **Data_Store_Knowledge** (データストア & ナレッジ化) | 永続化・ベクトル化・構造化・リアルタイム配信 | **Neon (PostgreSQL 15+ with pgvector)** に全テーブルを一元管理。GraphRAG で政策・施策を知識グラフ化。**@huggingface/transformers (ONNX/WASM)** によるローカル Embedding 生成（**BAAI/bge-m3 1024次元**）→ Neon pgvector に保存。BM25 + pgvector RRF + **bge-reranker-base (ONNX)** 二次リランク。 |
 | **Backend_Space** (統合バックエンド) | ドメインロジック・API・MCP | FastAPI + uv。助成金・予算 / 提案書生成・シミュレーション / 市民参加 (Plurality) / 実行・資金調達 / 認証・ZKP・DID の5ドメインに分割。**MCP Gateway (Stdio/HTTP)** で全APIを67+のLLMツールとして公開し、Claude等からの自然言語操作を実現。 |
 | **External_Services** (外部連携) | 認証・決済・プッシュ通知 | Stripe API (寄付決済)、Firebase Cloud Messaging (OS標準プッシュ通知)。 |
 | **Client_Space** (フロントエンド) | PC Web + モバイルアプリ | React 19 + Vite + TypeScript。**react-markdown** による確定的 Markdown のリッチレンダリングおよび **@hello-pangea/dnd** による申請進捗カンバンボード。PC用 Web画面とモバイルアプリ (PWA / Capacitor: 協議・投票、ウォレット、zk-SNARKs Prover WASM) に論理分割。Hey API による型・SDK・Zod の自動生成。 |

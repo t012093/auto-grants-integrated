@@ -330,7 +330,20 @@ class CascadeWatchCollector:
 
 ## 3. Embeddingプロバイダ設計 (Mock/Offline対応)
 
-開発環境で完全にオフライン動作させたい場合や、テスト時にModal接続を行わないための `MockEmbeddingService` を実装する。
+Modal / ローカルで稼働する `BAAI/bge-m3` (1024次元) と `bge-reranker-base` にアクセスし、Supabase（pgvector）と連携してセマンティック検索およびマッチングを行う本番ロジックの設計。
+
+```python
+class CloudEmbeddingService(EmbeddingServiceBase):
+    """Modal GPU インフラ上で稼働する Embedding / Reranking API 通信"""
+
+    def __init__(self, endpoint: str = "https://api.modal.run/v1"):
+        self.endpoint = endpoint
+
+    async def get_embedding(self, text: str) -> list[float]:
+        """BAAI/bge-m3 による1024次元のベクトル生成"""
+```
+
+### 3.1 MockEmbeddingService (開発環境用)
 
 ```python
 import random
@@ -339,9 +352,9 @@ class MockEmbeddingService(EmbeddingServiceBase):
     """
     オフラインおよびローカルテスト用のモックプロバイダ。
     pgvector コサイン類似度計算時のゼロ除算 (division by zero) エラーを防ぐため、
-    極小のランダムなノイズを乗せた 768 次元ベクトルを返却する。
+    極小のランダムなノイズを乗せた 1024 次元ベクトルを返却する。
     """
-    def __init__(self, dimensions: int = 768):
+    def __init__(self, dimensions: int = 1024):
         self.dimensions = dimensions
 
     async def embed_texts(self, texts: list[str], type: str = "passage") -> list[list[float]]:
@@ -360,8 +373,9 @@ class MockEmbeddingService(EmbeddingServiceBase):
 # Modalが起動するまでの最大3分間、またはオフライン環境において、pg_trgm（日本語3-gram）を用いた
 # トリグラム類似度検索を PostgreSQL/Supabase 側で実行して暫定的な検索結果を返す。
 #
-# [重要] フォールバック時はベクトル検索 (pgvector) を使用しない。
-#   Modal GPU の Embedding (768次元 bge-base-ja-v1.5) と次元が一致しないローカルモデルで
+# [重要] 
+# - 本番用の次元数は 1024 (BAAI/bge-m3) で固定。
+#   Modal GPU の Embedding (1024次元 BAAI/bge-m3) と次元が一致しないローカルモデルで
 #   pgvector カラムに書き込むと、次元不整合エラーが発生するため。
 #   フォールバック = PostgreSQL pg_trgm による純粋なテキスト類似度検索。
 #
@@ -386,7 +400,7 @@ class MockEmbeddingService(EmbeddingServiceBase):
 
 ### 3.3 Modal本番環境セマンティック検索・AIマッチング詳細設計
 
-Modal / ローカルで稼働する `bge-base-ja-v1.5` (768次元) と `bge-reranker-base` にアクセスし、Supabase（pgvector）と連携してセマンティック検索およびマッチングを行う本番ロジックの設計。
+Modal / ローカルで稼働する `BAAI/bge-m3` (1024次元) と `bge-reranker-base` にアクセスし、Supabase（pgvector）と連携してセマンティック検索およびマッチングを行う本番ロジックの設計。
 
 #### クラス構成と処理フロー
 
@@ -400,11 +414,11 @@ class ModalAIService:
         self.headers = {"Authorization": f"Bearer {api_key}"}
 
     async def get_embedding(self, text: str) -> list[float]:
-        """bge-base-ja-v1.5 による768次元のベクトル生成"""
+        """BAAI/bge-m3 による1024次元のベクトル生成"""
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.endpoint}/v1/embeddings",
-                json={"input": text, "model": "bge-base-ja-v1.5"},
+                json={"input": text, "model": "BAAI/bge-m3"},
                 headers=self.headers,
                 timeout=10.0
             )

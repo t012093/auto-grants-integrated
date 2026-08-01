@@ -49,7 +49,7 @@ CREATE TABLE public.profiles (
   bio TEXT,
   interest_areas TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
   preferred_theme TEXT NOT NULL DEFAULT 'cosmic', -- 'cosmic' (Dark) or 'nordic' (Light)
-  embedding vector(768), -- ユーザープロファイル・スキルベクトル (bge-base-ja-v1.5 768次元)
+  embedding vector(1024), -- ユーザープロファイル・スキルベクトル (BAAI/bge-m3 1024次元)
   did TEXT UNIQUE, -- W3C標準の自己主権型分散ID (DID)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
@@ -243,7 +243,7 @@ CREATE TABLE public.knowledge_chunks (
   id SERIAL PRIMARY KEY,
   grant_id INTEGER REFERENCES public.grants(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
-  embedding vector(768) NOT NULL, -- bge-base-ja-v1.5 768次元
+  embedding vector(1024) NOT NULL, -- BAAI/bge-m3 1024次元
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -541,7 +541,7 @@ CREATE TABLE public.projects (
   status public.project_status NOT NULL DEFAULT 'DRAFT',
   participants INTEGER NOT NULL DEFAULT 0,
   max_participants INTEGER NOT NULL DEFAULT 1,
-  embedding vector(768), -- プロジェクト要求・目的ベクトル (bge-base-ja-v1.5 768次元)
+  embedding vector(1024), -- プロジェクト要求・目的ベクトル (BAAI/bge-m3 1024次元)
   created_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW()),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT TIMEZONE('utc', NOW())
 );
@@ -615,7 +615,7 @@ $$ LANGUAGE plpgsql;
 
 ## 4. ボランティア・スキルマッチング仕様 (RAG基盤流用)
 
-助成金RAGで使用しているローカル Embedding インフラ（bge-base-ja-v1.5 768次元 + bge-reranker-base ONNX）と Supabase ベクトルストアを再利用し、ボランティアとプロジェクトのスキルマッチングを行います。
+助成金RAGで使用しているローカル Embedding インフラ（BAAI/bge-m3 1024次元 + bge-reranker-base ONNX）と Supabase ベクトルストアを再利用し、ボランティアとプロジェクトのスキルマッチングを行います。
 
 ### 4.1 ベクトル生成データソースマッピング
 
@@ -828,7 +828,7 @@ CREATE TABLE public.project_impacts (
 
 ### 6.2 Embedding & ベクトル検索仕様 (Supabase pgvector 統一)
 1. **ローカル Embedding 生成**:
-   * `@huggingface/transformers` (ONNX/WASM) を使用し、`bge-base-ja-v1.5` (768 次元) でローカルにベクトルを生成。
+   * `@huggingface/transformers` (ONNX/WASM) を使用し、`BAAI/bge-m3` (1024 次元) でローカルにベクトルを生成。
    * 生成したベクトルは **Supabase (PostgreSQL 15 + pgvector)** の `public.knowledge_chunks` テーブルに INSERT。
 2. **ベクトル検索**:
    * Supabase pgvector HNSW インデックスによるコサイン類似度検索。
