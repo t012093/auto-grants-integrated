@@ -13,8 +13,8 @@
 発生した場合、DB で管理する必要がある。
 
 **実装方針**:
-- [ ] `grant_expense_rules` テーブルに `recategory_keywords JSONB DEFAULT NULL` カラムを追加
-- [ ] `ConstraintSolver` にて DB の値を優先し、`NULL` の場合は `constants.py` のデフォルト値をフォールバック
+- [x] `grant_expense_rules` テーブルに `recategory_keywords JSONB DEFAULT NULL` カラムを追加
+- [x] `ConstraintSolver` にて DB の値を優先し、`NULL` の場合は `constants.py` のデフォルト値をフォールバック
 - [ ] 管理画面（または MCP ツール）から助成金単位でキーワードを編集可能にする
 
 **着手条件**: 助成金ごとの個別キーワード対応が実際に必要になった時点。

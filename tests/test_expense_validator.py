@@ -468,3 +468,62 @@ class TestAutoFillAlreadyFullCoverage:
         assert auto_filled is False
 
 
+# ===========================================================================
+# Phase 2: カスタムキーワードマップ テスト
+# ===========================================================================
+
+
+class TestCustomKeywordMap:
+    """keyword_map 引数によるキーワードマップ差し替えテスト"""
+
+    def test_custom_keyword_triggers_recategorization(self):
+        """カスタムキーワード "CUSTOM_KW" で OTHER → SYSTEM への振替が発生する"""
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule("SYSTEM", allowed=True),
+        ]
+        prefs = [
+            make_pref("OTHER", 1, 200_000, notes="CUSTOM_KW利用料"),
+        ]
+        custom_map = {"SYSTEM": ["CUSTOM_KW"]}
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs,
+            keyword_map=custom_map
+        )
+        suggested = [i for i in items if i["status"] == "SUGGESTED_RECATEGORIZATION"]
+        assert len(suggested) == 1
+        assert suggested[0]["suggested_category_code"] == "SYSTEM"
+
+    def test_empty_keyword_map_disables_recategorization(self):
+        """空の keyword_map={} で振替が一切発生しない"""
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule("SYSTEM", allowed=True),
+        ]
+        prefs = [
+            # notes に通常なら検知されるキーワードを含む
+            make_pref("OTHER", 1, 200_000, notes="API利用料 LLM"),
+        ]
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs,
+            keyword_map={}
+        )
+        # 振替提案は0件、全て EXCLUDED になる
+        assert all(i["status"] == "EXCLUDED" for i in items)
+
+    def test_none_keyword_map_uses_default(self):
+        """keyword_map=None (デフォルト) で constants.py の KEYWORD_RECATEGORY_MAP が使用される"""
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule("SYSTEM", allowed=True),
+        ]
+        prefs = [
+            make_pref("OTHER", 1, 200_000, notes="API利用料"),
+        ]
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs,
+            keyword_map=None
+        )
+        suggested = [i for i in items if i["status"] == "SUGGESTED_RECATEGORIZATION"]
+        assert len(suggested) == 1
+        assert suggested[0]["suggested_category_code"] == "SYSTEM"

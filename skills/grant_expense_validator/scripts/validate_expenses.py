@@ -76,10 +76,21 @@ class ConstraintSolver:
         return effective_limit, limit_str
 
     @classmethod
-    def _detect_suggested_category(cls, text: str, rule_map: Dict[str, Any]) -> Optional[Tuple[str, str, List[str]]]:
-        """Scans text for keywords and checks if an allowed target category exists."""
+    def _detect_suggested_category(
+        cls,
+        text: str,
+        rule_map: Dict[str, Any],
+        keyword_map: Optional[Dict[str, List[str]]] = None,
+    ) -> Optional[Tuple[str, str, List[str]]]:
+        """Scans text for keywords and checks if an allowed target category exists.
+
+        Args:
+            keyword_map: カテゴリ別キーワード辞書。None の場合は constants.py の
+                         KEYWORD_RECATEGORY_MAP をフォールバックとして使用する。
+        """
+        effective_map = keyword_map if keyword_map is not None else KEYWORD_RECATEGORY_MAP
         text_upper = text.upper()
-        for target_cat, keywords in KEYWORD_RECATEGORY_MAP.items():
+        for target_cat, keywords in effective_map.items():
             matched_kws = [kw for kw in keywords if kw.upper() in text_upper]
             if matched_kws:
                 rule = rule_map.get(target_cat)
@@ -94,14 +105,22 @@ class ConstraintSolver:
         grant_amount_max: int,
         rules: List[Dict[str, Any]],
         preferences: List[Dict[str, Any]],
-        auto_fill: bool = False
+        auto_fill: bool = False,
+        keyword_map: Optional[Dict[str, List[str]]] = None,
     ) -> Tuple[List[Dict[str, Any]], int, List[str], bool]:
+        """Deterministic Constraint Solver.
+
+        Args:
+            keyword_map: カテゴリ別振替キーワード辞書。None の場合は constants.py の
+                         デフォルト値 (KEYWORD_RECATEGORY_MAP) を使用する。
+        """
         # Bug 3 Fix: amount_max が 0 以下なら早期エラー
         if grant_amount_max <= 0:
             raise ValueError(
                 f"助成上限額 (amount_max) が 0 以下です ({grant_amount_max})。助成金データを確認してください。"
             )
 
+        resolved_map = keyword_map if keyword_map is not None else KEYWORD_RECATEGORY_MAP
         rule_map = {r["category_code"]: r for r in rules}
         remaining_budget = grant_amount_max
         allocated_items: List[Dict[str, Any]] = []
@@ -121,7 +140,7 @@ class ConstraintSolver:
             # Pattern A: Not Allowed Rule -> Check Auto Recategorization
             if rule and not rule.get("allowed", True):
                 full_text = f"{cat_label} {pref_notes}"
-                suggested_info = cls._detect_suggested_category(full_text, rule_map)
+                suggested_info = cls._detect_suggested_category(full_text, rule_map, keyword_map=resolved_map)
 
                 if suggested_info:
                     target_cat, target_label, matched_kws = suggested_info
@@ -357,11 +376,25 @@ class ExpenseValidator:
                         {"category_code": "PROMOTION", "priority": 3, "desired_amount": int(amount_max * 0.2)},
                     ]
 
+        # Phase 2: キーワードマップ合成 (DB値優先、NULLはconstantsフォールバック)
+        db_keyword_map: Dict[str, List[str]] = {}
+        for rule in rules:
+            kw = rule.get("recategory_keywords")
+            if kw is not None:
+                db_keyword_map[rule["category_code"]] = kw
+
+        if db_keyword_map:
+            merged_map: Optional[Dict[str, List[str]]] = dict(KEYWORD_RECATEGORY_MAP)
+            merged_map.update(db_keyword_map)
+        else:
+            merged_map = None  # 全部NULL → フォールバック（従来動作）
+
         allocated_items, remaining_budget, recommendations, auto_fill_applied = ConstraintSolver.solve(
             grant_amount_max=amount_max,
             rules=rules,
             preferences=preferences,
-            auto_fill=auto_fill
+            auto_fill=auto_fill,
+            keyword_map=merged_map
         )
 
         total_allocated = sum(item["allocated_amount"] for item in allocated_items)

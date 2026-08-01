@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS public.grant_expense_rules (
   allowed BOOLEAN NOT NULL DEFAULT TRUE,
   max_limit BIGINT,             -- 定額上限 (円)
   max_ratio NUMERIC(5,4),       -- 助成金上限額に対する比率上限 (例: 0.4000 = 40%)
+  recategory_keywords JSONB,    -- 振替検知キーワードリスト (Phase 2)。NULL=constants.pyデフォルト、[]=振替無効
   exceptions TEXT,              -- 「ただし〜」等の但し書き例外条件
   notes TEXT,                   -- 補足・対象外理由
   evidence_quote TEXT,          -- 公募要領からの原文引用句
@@ -60,6 +61,14 @@ CREATE TABLE IF NOT EXISTS public.grant_expense_rules (
   CONSTRAINT uq_expense_rule UNIQUE (grant_id, category_code)
 );
 ```
+
+### `recategory_keywords` の値と動作
+
+| DB値 | 動作 |
+|------|------|
+| `NULL` | `constants.py` の `KEYWORD_RECATEGORY_MAP` をフォールバック（デフォルト動作）|
+| `[]` (空配列) | このカテゴリへの振替を明示的に無効化 |
+| `["kw1", "kw2"]` | カスタムキーワードで上書き |
 
 ---
 
@@ -80,6 +89,12 @@ skills/grant_expense_validator/scripts/validate_expenses.py
 1. **データロード**:
    - `grants` から助成上限額 (`amount_max`) を取得。
    - `grant_expense_rules` および `npo_expense_preferences` を取得（`priority` 昇順）。
+
+1.5. **キーワードマップ合成** (Phase 2):
+   - `grant_expense_rules` の各行の `recategory_keywords` を確認。
+   - `NULL` でないカテゴリ → DB 値で上書き。
+   - 全て `NULL` → `constants.py` の `KEYWORD_RECATEGORY_MAP` をそのまま使用（従来動作）。
+   - 1件でも非NULL → デフォルトマップをコピー後、DB 値で部分上書き（部分カスタマイズ対応）。
 
 2. **優先度順 機械的制約配分**:
    - 各希望 `preference` について配分計算：
