@@ -107,17 +107,24 @@ skills/
 ## 3. 添付資料パース & OCR エンジン (`attachment_ocr_processor`)
 
 ### 目的
-公募要領 PDF、実施細則、Q&A 集などの添付資料からテキストを抽出し、`detail_text` に統合および経費ルール DB (`grant_expense_rules`) へ確定パースします。
+公募要領 PDF、実施細則、Q&A 集などの添付資料からテキストを確定的かつ超高速に抽出し、`detail_text` に統合および経費ルール DB (`grant_expense_rules`) へ確定パースします。
 
-### 処理仕様
-1. **対象**: `attachment_urls` が非空かつ `is_ocr_processed = FALSE` のレコード。
+### 処理仕様 (`extract_pdf.py`)
+1. **対象**: `attachment_urls` が非空かつ `is_ocr_processed = FALSE` のレコード、またはローカル指定 PDF (`--pdf-path`)。
 2. **抽出ツールチェーン**:
-   * **PDF/Office**: `MarkItDown` (Microsoft 製 Python ライブラリ) によるテキスト抽出。
-   * **スキャン PDF (画像ベース)**: `Surya OCR` (ローカル実行) でテキスト化。
-3. **確定的経費ルール抽出 (ハルシネーション 0%)**:
-   * **表データ**: `JsonCss` / `markdownify` / `Crawl4AI` による HTML/PDF 表構造の機械的型変換。
-   * **本文注釈テキスト**: LLM 抽出結果に対し `Substring Match Guard` で原文完全一致を検証。不一致時は即時棄却 (Reject)。
-4. **格納**: 抽出テキストを `detail_text` に追記し、経費ルールを `public.grant_expense_rules` へインサート。完了後 `is_ocr_processed = TRUE` に更新。
+   * **超高速テキストパース**: **`PyMuPDF` (`fitz`)** による 10〜50ms/ページの確定レイアウト保持テキスト化。
+   * **表構造抽出**: `pdfplumber` / `PyMuPDF` によるテーブルセルの確定データ化。
+   * **画像スキャン PDF (文字なし)**: テキスト抽出量 100 文字未満時に `Surya OCR` / `pytesseract` へ自動フォールバック。
+3. **ハルシネーション 0% 確定ガード仕様**:
+   * **項目 4 (対象経費条件 `expense_rules`)**: パターン判定により `allowed` (True/False)、`max_ratio`、`max_limit` を確定データ化し、`grant_expense_rules` に保存。Solver (`validate_expenses.py`) が対象外経費を 100% 機械的排除。
+   * **項目 5 (提出必須書類 `required_documents`)**: 標準 Enum マスター (`ARTICLES`, `FINANCIAL_REPORT`, `BOARD_LIST`, `REGISTRY_CERTIFICATE` 等) へのマッピングおよび原文キーワードの決定論的検索で作成。Stage 2 集合演算 (`missing = required - prepared`) で確定差分算出。
+   * **項目 1〜3 (審査基準・公募趣旨・事業期間)**: `Substring Match Guard` で抽出引用句と PDF 原文の完全一致を検証。不一致時は即時棄却 (Reject)。
+4. **4 大エッジケース安全制御 (Safeguards)**:
+   * **複数 PDF 優先度制御**: `要綱` > `細則` > `Q&A` > `記入例` の順でファイル優先度付与。記述矛盾時は最新「Q&A / 細則」を優先。
+   * **算術ルール自動抽出**: 税込/税抜・端数処理（円未満切り捨て）を抽出し Solver の計算式に自動セット。
+   * **JST タイムゾーン補正**: 時刻欠損時は「17:00 JST (+09:00)」をデフォルト締切として補正登録。
+   * **Word 指定様式枠はみ出し自動抑制**: `officecli query` で制限文字数を取得し、文字数以内に自動縮約流し込み。
+5. **格納**: 抽出テキストを `detail_text` に追記統合し、1024 次元ベクトル化して `public.knowledge_chunks` へ保存。完了後 `is_ocr_processed = TRUE` に更新。
 
 ---
 

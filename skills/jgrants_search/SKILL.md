@@ -24,11 +24,21 @@ description: デジタル庁 jGrants 公式 API に接続し、全国・富山�
 ### `scripts/search_jgrants.py`
 デジタル庁公式 API と通信し、リアルタイムで助成金・公募情報を検索・抽出する汎用 CLI スクリプト。
 
+### `scripts/extract_pdf.py` 📋 実装予定
+`PyMuPDF` を用いて公募要領 PDF を超高速テキスト化し、審査基準・対象経費・事業期間等の要件を確定的かつハルシネーション 0% ガード付きで構造化抽出する CLI スクリプト。
+
 #### スクリプトの実行方法
 
 ```bash
 # 基本検索 (キーワード指定)
 uv run skills/jgrants_search/scripts/search_jgrants.py --keyword "地域"
+
+# 公募要領 PDF の自動パース & 要件構造化
+uv run skills/jgrants_search/scripts/extract_pdf.py --grant-id 1
+
+# ローカル指定 PDF からの自動パース & DB保存
+uv run skills/jgrants_search/scripts/extract_pdf.py --pdf-path ./guideline.pdf --grant-id 1
+```
 
 # 「補助率 10/10 (全額補助)」のみに絞り込んで検索
 uv run skills/jgrants_search/scripts/search_jgrants.py --rate-10-10
