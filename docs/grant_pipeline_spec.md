@@ -49,7 +49,7 @@ skills/
 ├── jgrants_search/                       # 1. 全件・条件検索スキル
 │   ├── SKILL.md
 │   └── scripts/
-│       ├── search_jgrants.py             # jGrants API 多角巡回・一次絞り込み CLI
+│       ├── search_jgrants.py             # jGrants API 多角巡回・一次絞り込み & DB保存 (--save-db) CLI
 │       └── sync_grants_cron.py           # 深夜帯の差分同期 & 受付終了 (CLOSED) 更新スクリプト
 │
 ├── grant_eligibility_checker/            # 2. 17項目要件適合 & 書類チェック
@@ -93,8 +93,14 @@ skills/
 3. **ステータス自動変更 (`OPEN` $\to$ `CLOSED`)**:
    * DB 内の `source = 'jgrants'` かつ `status = 'OPEN'` の ID 集合 $S_{db}$ と比較。
    * $S_{closed} = S_{db} \setminus S_{api}$ の対象レコードの `status` を `'CLOSED'` へ更新。
-4. **新規・更新データの Upsert**:
-   * `ON CONFLICT (source, source_grant_id) DO UPDATE` を実行。
+4. **新規・更新データの Upsert (自動Cron & CLI手動同期)**:
+   * Cron バッチ時および `search_jgrants.py --save-db` 実行時に `ON CONFLICT (source, source_grant_id) DO UPDATE` を実行し、`public.grants` テーブルへ即時保存・更新。
+
+### 二重保存防止 ＆ 安全制御ガイドライン (Upsert Safeguards)
+* **二重登録の完全防止**: 複合ユニークインデックス `uq_grants_source_grant_id (source, source_grant_id)` により、同一 ID の助成金が複数回保存されても既存行の上書き更新となり、重複登録を 100% 排除する。
+* **限定カラム更新 (既存リソースの非破壊)**: `DO UPDATE` 時は `title`, `provider`, `amount_max`, `deadline`, `details_url`, `target_area`, `is_rate_10_10`, `is_advance_payment`, `detail_text`, `status`, `updated_at` のみを上書きし、既に解析済みの `is_ocr_processed` や `grant_expense_rules`（経費ルール）、`knowledge_chunks`（ベクトルデータ）は保持する。
+* **不備データの事前スキップ**: `source_grant_id` や `title` が欠損している不完全データは DB 書き込み前にバリデーションで弾き、保存を自動スキップする。
+* **一括バッチ処理**: 大量データを保存する際は単一トランザクション内で一括処理し、DB コネクション負荷とレスポンス遅延を防止する。
 
 ---
 

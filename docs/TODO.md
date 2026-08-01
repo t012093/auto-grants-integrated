@@ -21,6 +21,17 @@
 
 ---
 
+## jgrants_search: 自社 DB 直接保存機能 (`--save-db`)
+
+**背景**: 現在 `search_jgrants.py` はリアルタイム検索と画面/JSON表示のみとなっており、検索したデータをパイプラインで利用するために `public.grants` テーブルへ即時保存・更新する手段が必要。
+
+**実装方針**:
+- [x] `search_jgrants.py` に `--save-db` フラグを追加
+- [x] 検索結果を `public.grants` テーブルへ `ON CONFLICT (source, source_grant_id) DO UPDATE` で Upsert 保存するロジックの実装
+- [x] DB書き込み完了件数および成功/失敗ログの表示
+
+---
+
 ## テストカバレッジの穴
 
 - [x] 振替先に `max_limit`/`max_ratio` がある場合、振替額が制限される挙動

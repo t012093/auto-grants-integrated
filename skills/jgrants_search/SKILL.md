@@ -39,6 +39,9 @@ uv run skills/jgrants_search/scripts/search_jgrants.py --area "全国" --rate-10
 # 助成上限額 100 万円以上の 10/10 助成金を検索
 uv run skills/jgrants_search/scripts/search_jgrants.py --rate-10-10 --min-amount 1000000
 
+# 助成上限額 100 万円以上の 10/10 助成金を検索し、自社 DB へ直接保存
+uv run skills/jgrants_search/scripts/search_jgrants.py --rate-10-10 --min-amount 1000000 --save-db
+
 # JSON 形式で出力
 uv run skills/jgrants_search/scripts/search_jgrants.py --area "全国" --rate-10-10 --json
 ```
@@ -55,8 +58,8 @@ uv run skills/jgrants_search/scripts/search_jgrants.py --area "全国" --rate-10
 | `--advance-payment` | `flag` | 概算払い・前払い記載のあるものに絞り込む | `--advance-payment` |
 | `--min-amount` | `int` | 助成上限額の下限 (円) | `--min-amount 1000000` |
 | `--max-amount` | `int` | 助成上限額の上限 (円) | `--max-amount 50000000` |
-
 | `--limit` | `int` | 出力件数の上限 (デフォルト: 10) | `--limit 10` |
+| `--save-db` | `flag` | 検索結果を自社 DB (`public.grants`) に自動 Upsert 保存 | `--save-db` |
 | `--json` | `flag` | JSON 形式で標準出力 | `--json` |
 
 ---
@@ -89,8 +92,10 @@ jGrants API の仕様上、`keyword` パラメータが未指定の場合は 0 �
 ### Phase 3.5: 団体プロファイル照合 ＆ 17項目適合チェック
 > **📋 本機能は [grant_eligibility_checker](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_eligibility_checker/SKILL.md) スキルに委譲しています。** 検索結果に対して団体適合チェックを行う場合は、検索後に `check_eligibility.py --org-id ... --grant-id ...` を実行してください。
 
-### Phase 4: DB 保存 (`public.grants`) & Office 連携
-* **DB マッピング**: `source_grant_id`, `title`, `provider`, `amount_min`, `amount_max`, `deadline`, `details_url`, `target_area`, `is_rate_10_10`, `is_advance_payment`, `eligible_org_types`, `min_years_active`, `required_documents`, `detail_text`, `payload_json` へ書き込み。
+### Phase 4: DB 保存 (`public.grants`) & 二重保存防止・安全制御 (`--save-db`)
+* **二重保存防止 (Upsert)**: 複合ユニーク制約 `(source, source_grant_id)` に基づき `ON CONFLICT (source, source_grant_id) DO UPDATE` を実行。重複登録を 100% 排除。
+* **破壊的上書きの防止**: 既存の `is_ocr_processed` フラグやパース済みの `grant_expense_rules`（経費ルール）を保持するため、更新対象を `title`, `provider`, `amount_max`, `deadline`, `details_url`, `target_area`, `is_rate_10_10`, `is_advance_payment`, `detail_text`, `status`, `updated_at` の動的カラムに限定。
+* **事前バリデーション**: `source_grant_id`, `title` 欠損などの不完全データは DB 保存を自動スキップ。
 * **Office 出力**: CSV / JSON 出力後、`officecli` を用いて `.xlsx` および `.docx` に変換。
 
 ---
