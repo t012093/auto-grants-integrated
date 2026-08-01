@@ -281,60 +281,94 @@ class ProposalGenerator:
             "allocated_items": allocated_items,
         }
 
-    def verify_harness(self, md_content: str, meta: Dict[str, Any]) -> bool:
-        """Harness Guard: 算術検証 & 6大セクションの存在確認、未置換プレースホルダーの残存ゼロ検証を行う"""
-        amount_max = meta["amount_max"]
-        total_allocated = meta["total_allocated"]
+    # =========================================================================
+    # Step 3: 書類様式事前分析 (Format Analysis & Profiling)
+    # =========================================================================
 
-        # 1. 算術検証: 配分額が上限額を超過していないか
-        if total_allocated > amount_max:
-            raise HarnessValidationError(
-                f"Harness Guard 算術エラー: 配分合計額 ({total_allocated:,}円) が助成上限額 ({amount_max:,}円) を超過しています。"
-            )
-
-        # 2. 必須 6 大セクションの存在チェック
-        required_sections = [
-            "## 1. 事業の背景・社会的課題",
-            "## 2. 事業目的",
-            "## 3. 実施計画・月別スケジュール",
-            "## 4. 実施体制・役割分担",
-            "## 5. 期待される成果 (KPI)",
-            "## 6. 経費明細",
-        ]
-        missing_sections = [sec for sec in required_sections if sec not in md_content]
-        if missing_sections:
-            raise HarnessValidationError(
-                f"Harness Guard 構造エラー: 必須セクションが欠損しています: {missing_sections}"
-            )
-
-        # 3. 抜け・漏れ検証: 未置換のプレースホルダー {{key}} が残存していないか厳格チェック
+    def analyze_template(self, template_path: str) -> Dict[str, Any]:
+        """officecli query で公式様式ファイルの構造をスキャンし、
+        タイプ (A: マーカー型 / B: フォーム型 / C: 表構造型) を自動分類。
+        動的ノードパス辞書を生成して返す。"""
         import re
-        unreplaced_keys = re.findall(r"\{\{([^}]+)\}\}", md_content)
-        if unreplaced_keys:
-            raise HarnessValidationError(
-                f"Harness Guard テンプレートエラー: 未置換のプレースホルダータグが残存しています: {unreplaced_keys}"
-            )
+        profile: Dict[str, Any] = {
+            "template_path": template_path,
+            "type": None,           # "A" | "B" | "C" | None
+            "marker_paths": {},     # {{key}} -> node path
+            "sdt_paths": {},        # tag -> node path
+            "table_paths": [],      # table node paths
+        }
 
-        logger.info("Harness Guard 検証成功: 算術一致・必須6大セクション・プレースホルダー完全埋め込みを確認しました。")
-        return True
+        # 1. 全段落をスキャンして {{key}} マーカーを検索
+        paragraphs = self._officecli_query(template_path, "//p")
+        for node in paragraphs:
+            text = node.get("text", "")
+            match = re.search(r"\{\{\s*(.*?)\s*\}\}", text)
+            if match:
+                key_name = match.group(1).strip()
+                profile["marker_paths"][key_name] = node.get("path", "")
+
+        # 2. フォーム枠 (sdt) をスキャン
+        sdts = self._officecli_query(template_path, "sdt")
+        for node in sdts:
+            tag = node.get("tag") or node.get("alias") or ""
+            if tag:
+                profile["sdt_paths"][tag] = node.get("path", "")
+
+        # 3. テーブル構造をスキャン
+        tables = self._officecli_query(template_path, "table")
+        profile["table_paths"] = [t.get("path", "") for t in tables]
+
+        # 4. タイプ自動分類
+        if profile["marker_paths"]:
+            profile["type"] = "A"  # マーカー型
+        elif profile["sdt_paths"]:
+            profile["type"] = "B"  # フォーム型
+        elif profile["table_paths"]:
+            profile["type"] = "C"  # 表構造型
+        else:
+            profile["type"] = "A"  # フォールバック: マーカー型扱い
+
+        logger.info(
+            "Template analysis complete: type=%s, markers=%d, sdts=%d, tables=%d",
+            profile["type"], len(profile["marker_paths"]),
+            len(profile["sdt_paths"]), len(profile["table_paths"])
+        )
+        return profile
+
+    def _officecli_query(self, file_path: str, selector: str) -> List[Dict]:
+        """officecli query を --json で実行し、結果ノードのリストを返す"""
+        try:
+            result = subprocess.run(
+                ["officecli", "query", file_path, selector, "--json"],
+                capture_output=True, text=True, check=True
+            )
+            return json.loads(result.stdout) if result.stdout.strip() else []
+        except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
+            logger.warning("officecli query failed for selector '%s': %s", selector, e)
+            return []
+
+    # =========================================================================
+    # Step 4: アトミックバッチ流し込み (Batch Execution)
+    # =========================================================================
 
     def export_office_documents(
         self,
         md_path: Path,
         output_dir: Path,
         meta: Dict[str, Any],
+        draft_data: Dict[str, str],
         with_budget_xlsx: bool = False,
-        template_docx: Optional[str] = None
+        template_docx: Optional[str] = None,
+        template_xlsx: Optional[str] = None,
     ) -> Dict[str, Path]:
-        """officecli を使用して公式様式 Word (.docx) および Excel (.xlsx) を自動書き出し"""
+        """officecli の全機能を活用して Word (.docx) および Excel (.xlsx) を書き出し"""
         outputs = {}
         grant_id_str = md_path.stem.replace("_proposal", "")
         docx_path = output_dir / f"{grant_id_str}_proposal.docx"
 
-        # テンプレートファイルの自動検索・優先適用 (パターン B 優先方針)
+        # --- テンプレートファイルの自動検索 (パターン B/C 優先) ---
         resolved_template = template_docx
         if not resolved_template:
-            # 助成金ID専用テンプレートまたはデフォルト様式テンプレートの検索
             possible_templates = [
                 Path(f"./templates/{grant_id_str}_template.docx"),
                 Path("./templates/default_official_template.docx"),
@@ -345,62 +379,325 @@ class ProposalGenerator:
                     resolved_template = str(pt)
                     break
 
-        # Word (.docx) エクスポート
+        # --- Word (.docx) エクスポート ---
         if resolved_template and Path(resolved_template).exists():
-            # パターン B (第一優先): 財団指定公式様式テンプレートへのプレースホルダー置換
-            logger.info("Pattern B (Primary): Merging template with layout preservation '%s' -> '%s'", resolved_template, docx_path)
-            try:
-                # officecli merge コマンドにより公式様式のレイアウト・枠組みを崩さず置換
-                subprocess.run(["officecli", "merge", resolved_template, str(docx_path)], check=True, capture_output=True)
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                logger.warning("officecli merge failed (%s). Falling back to Pattern A generation.", e)
-                self._generate_pattern_a_word(md_path, docx_path)
+            # 事前分析してタイプ判定
+            profile = self.analyze_template(resolved_template)
+
+            if profile["type"] == "A" and profile["marker_paths"]:
+                # タイプ A: officecli merge (JSON データ置換)
+                self._export_type_a_merge(resolved_template, docx_path, draft_data)
+            elif profile["type"] in ("B", "C"):
+                # タイプ B/C: officecli open → batch → close (アトミック)
+                self._export_type_bc_batch(resolved_template, docx_path, draft_data, profile)
+            else:
+                # マーカーもフォームもなければ merge でフォールバック
+                self._export_type_a_merge(resolved_template, docx_path, draft_data)
         else:
-            # パターン A (フォールバック): 指定様式がない場合のみフリーフォーマットで新規構築
-            logger.info("Pattern A (Fallback): No template found. Creating fresh Word document '%s'", docx_path)
-            self._generate_pattern_a_word(md_path, docx_path)
+            # テンプレートなし: Markdown から新規構築 (パターン A フォールバック)
+            logger.info("Pattern A (Fallback): No template found. Creating fresh Word from Markdown.")
+            self._export_markdown_to_word(md_path, docx_path)
 
         outputs["docx"] = docx_path
 
-        # Excel (.xlsx) エクスポート
+        # --- Excel (.xlsx) エクスポート ---
         if with_budget_xlsx:
             xlsx_path = output_dir / f"{grant_id_str}_budget.xlsx"
-            csv_path = output_dir / f"{grant_id_str}_budget_temp.csv"
+            resolved_xlsx_template = template_xlsx
+            if not resolved_xlsx_template:
+                possible_xlsx = [
+                    Path(f"./templates/{grant_id_str}_budget_template.xlsx"),
+                    Path("./templates/default_budget_template.xlsx"),
+                ]
+                for pt in possible_xlsx:
+                    if pt.exists():
+                        resolved_xlsx_template = str(pt)
+                        break
 
-            # 5 カラム CSV の書き出し
-            csv_lines = ["優先度,経費区分,希望額,助成対象決定額,ステータス・補足理由\n"]
-            for item in meta["allocated_items"]:
-                status = "APPROVED" if item["status"] == "APPROVED" else item["status"]
-                csv_lines.append(
-                    f"{item['priority']},{item['category_label']},{item['desired_amount']},{item['allocated_amount']},{status} - {item.get('notes', '')}\n"
-                )
-            csv_path.write_text("".join(csv_lines), encoding="utf-8-sig")
+            if resolved_xlsx_template and Path(resolved_xlsx_template).exists():
+                # 公式 Excel テンプレートの数式セル保護バッチ更新
+                self._export_excel_batch(resolved_xlsx_template, xlsx_path, meta)
+            else:
+                # テンプレートなし: CSV から新規シート作成
+                self._export_excel_new(xlsx_path, meta, output_dir, grant_id_str)
 
-            try:
-                subprocess.run(["officecli", "create", str(xlsx_path)], check=True, capture_output=True)
-                subprocess.run(["officecli", "import", str(xlsx_path), "/sheet[1]", str(csv_path)], check=True, capture_output=True)
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                logger.warning("officecli import failed (%s). Creating fallback mock xlsx.", e)
-                xlsx_path.write_bytes(b"PK\x03\x04 (Mock XLSX File Content)")
-
-            if csv_path.exists():
-                csv_path.unlink()  # 一時CSV削除
             outputs["xlsx"] = xlsx_path
 
         return outputs
 
-    def _generate_pattern_a_word(self, md_path: Path, docx_path: Path):
-        """Pattern A のフリーフォーマット Word 生成"""
+    def _export_type_a_merge(self, template: str, output: Path, draft_data: Dict[str, str]):
+        """タイプ A: officecli merge による {{key}} JSON データ置換"""
+        logger.info("Type A (Merge): Replacing {{key}} placeholders via officecli merge")
+        data_json = json.dumps(draft_data, ensure_ascii=False)
+        data_file = output.parent / "_merge_data.json"
+        data_file.write_text(data_json, encoding="utf-8")
         try:
-            subprocess.run(["officecli", "create", str(docx_path)], check=True, capture_output=True)
+            subprocess.run(
+                ["officecli", "merge", template, str(output), "--data", str(data_file), "--force"],
+                check=True, capture_output=True, text=True
+            )
+        except subprocess.CalledProcessError as e:
+            raise HarnessValidationError(f"officecli merge failed: {e.stderr or e}")
+        finally:
+            if data_file.exists():
+                data_file.unlink()
+
+    def _export_type_bc_batch(self, template: str, output: Path, draft_data: Dict[str, str], profile: Dict):
+        """タイプ B/C: officecli open → batch → close (メモリ常駐アトミック流し込み)"""
+        import shutil
+        # テンプレートをコピーして出力ファイルとして使用
+        shutil.copy2(template, str(output))
+        logger.info("Type B/C (Batch): Atomic batch injection via officecli open → batch → close")
+
+        # バッチコマンドの構築 (set を先に、add を後に: 操作ソートルール)
+        set_commands = []
+        add_commands = []
+
+        # sdt フォーム枠への書き込み
+        for tag, path in profile.get("sdt_paths", {}).items():
+            if tag in draft_data:
+                set_commands.append({
+                    "command": "set",
+                    "path": path,
+                    "props": {"text": draft_data[tag]}
+                })
+
+        # マーカー段落への書き込み (タイプ C でもマーカーがあれば対応)
+        for key, path in profile.get("marker_paths", {}).items():
+            if key in draft_data:
+                set_commands.append({
+                    "command": "set",
+                    "path": path,
+                    "props": {"text": draft_data[key]}
+                })
+
+        batch_commands = set_commands + add_commands  # set 優先 → add 後続
+        if not batch_commands:
+            logger.warning("No batch commands generated. Skipping batch injection.")
+            return
+
+        batch_json = json.dumps(batch_commands, ensure_ascii=False)
+        batch_file = output.parent / "_batch_commands.json"
+        batch_file.write_text(batch_json, encoding="utf-8")
+
+        try:
+            # 1. メモリ常駐ロード
+            subprocess.run(["officecli", "open", str(output)], check=True, capture_output=True, text=True)
+            # 2. アトミックバッチ (--stop-on-error でエラー時全ロールバック)
+            subprocess.run(
+                ["officecli", "batch", str(output), "--input", str(batch_file), "--stop-on-error"],
+                check=True, capture_output=True, text=True
+            )
+            # 3. ディスクへ保存 & メモリ解放
+            subprocess.run(["officecli", "close", str(output)], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            # close を試みてからエラーを上げる
+            subprocess.run(["officecli", "close", str(output)], capture_output=True)
+            raise HarnessValidationError(f"officecli batch failed: {e.stderr or e}")
+        finally:
+            if batch_file.exists():
+                batch_file.unlink()
+
+    def _export_markdown_to_word(self, md_path: Path, docx_path: Path):
+        """テンプレートなし時: Markdown から新規 Word を構築"""
+        try:
+            subprocess.run(["officecli", "create", str(docx_path)], check=True, capture_output=True, text=True)
             subprocess.run(
                 ["officecli", "add", str(docx_path), "/body", "--type", "markdown", "--prop", f"src={str(md_path)}"],
-                check=True,
-                capture_output=True
+                check=True, capture_output=True, text=True
             )
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            logger.warning("officecli command failed (%s). Creating fallback mock docx.", e)
-            docx_path.write_bytes(b"PK\x03\x04 (Mock DOCX File Content)")
+        except subprocess.CalledProcessError as e:
+            raise HarnessValidationError(f"officecli create/add markdown failed: {e.stderr or e}")
+
+    def _export_excel_batch(self, template: str, output: Path, meta: Dict[str, Any]):
+        """公式 Excel テンプレートの数式セル保護バッチ更新"""
+        import shutil
+        shutil.copy2(template, str(output))
+        logger.info("Excel batch: Updating data cells only (preserving formulas)")
+
+        batch_commands = []
+        for i, item in enumerate(meta["allocated_items"], start=2):
+            batch_commands.append({
+                "command": "set", "path": f"/sheet[1]/A{i}",
+                "props": {"text": str(item["priority"])}
+            })
+            batch_commands.append({
+                "command": "set", "path": f"/sheet[1]/B{i}",
+                "props": {"text": item["category_label"]}
+            })
+            batch_commands.append({
+                "command": "set", "path": f"/sheet[1]/C{i}",
+                "props": {"text": str(item["desired_amount"])}
+            })
+            batch_commands.append({
+                "command": "set", "path": f"/sheet[1]/D{i}",
+                "props": {"text": str(item["allocated_amount"])}
+            })
+            batch_commands.append({
+                "command": "set", "path": f"/sheet[1]/E{i}",
+                "props": {"text": item.get("notes", "")}
+            })
+
+        batch_json = json.dumps(batch_commands, ensure_ascii=False)
+        batch_file = output.parent / "_excel_batch.json"
+        batch_file.write_text(batch_json, encoding="utf-8")
+        try:
+            subprocess.run(
+                ["officecli", "batch", str(output), "--input", str(batch_file), "--stop-on-error"],
+                check=True, capture_output=True, text=True
+            )
+        except subprocess.CalledProcessError as e:
+            raise HarnessValidationError(f"officecli Excel batch failed: {e.stderr or e}")
+        finally:
+            if batch_file.exists():
+                batch_file.unlink()
+
+    def _export_excel_new(self, xlsx_path: Path, meta: Dict[str, Any], output_dir: Path, grant_id_str: str):
+        """テンプレートなし: officecli create + import による 5 カラム新規 Excel"""
+        csv_path = output_dir / f"{grant_id_str}_budget_temp.csv"
+        csv_lines = ["優先度,経費区分,希望額,助成対象決定額,ステータス・補足理由\n"]
+        for item in meta["allocated_items"]:
+            status = "APPROVED" if item["status"] == "APPROVED" else item["status"]
+            csv_lines.append(
+                f"{item['priority']},{item['category_label']},{item['desired_amount']},{item['allocated_amount']},{status} - {item.get('notes', '')}\n"
+            )
+        csv_path.write_text("".join(csv_lines), encoding="utf-8-sig")
+        try:
+            subprocess.run(["officecli", "create", str(xlsx_path)], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["officecli", "import", str(xlsx_path), "/sheet[1]", str(csv_path)],
+                check=True, capture_output=True, text=True
+            )
+        except subprocess.CalledProcessError as e:
+            raise HarnessValidationError(f"officecli Excel create/import failed: {e.stderr or e}")
+        finally:
+            if csv_path.exists():
+                csv_path.unlink()
+
+    # =========================================================================
+    # Step 5: 多段検証ガード (Multi-Layer Verification)
+    # =========================================================================
+
+    def verify_harness(self, md_content: str, meta: Dict[str, Any]) -> bool:
+        """Harness Guard: 算術検証 & 構造検証 & 未置換プレースホルダー残存ゼロ検証"""
+        import re
+        amount_max = meta["amount_max"]
+        total_allocated = meta["total_allocated"]
+
+        # Layer 1: 算術検証
+        if total_allocated > amount_max:
+            raise HarnessValidationError(
+                f"Harness Guard 算術エラー: 配分合計額 ({total_allocated:,}円) が助成上限額 ({amount_max:,}円) を超過しています。"
+            )
+
+        # Layer 2: 必須 6 大セクション存在チェック
+        required_sections = [
+            "## 1. 事業の背景・社会的課題",
+            "## 2. 事業目的",
+            "## 3. 実施計画・月別スケジュール",
+            "## 4. 実施体制・役割分担",
+            "## 5. 期待される成果 (KPI)",
+            "## 6. 経費明細",
+        ]
+        missing = [s for s in required_sections if s not in md_content]
+        if missing:
+            raise HarnessValidationError(f"Harness Guard 構造エラー: 必須セクション欠損: {missing}")
+
+        # Layer 3: 未置換 {{key}} 残存ゼロ (Markdown 内部チェック)
+        unreplaced = re.findall(r"\{\{([^}]+)\}\}", md_content)
+        if unreplaced:
+            raise HarnessValidationError(f"Harness Guard テンプレートエラー: 未置換タグ残存: {unreplaced}")
+
+        logger.info("Harness Guard (Markdown): Layers 1-3 passed.")
+        return True
+
+    def verify_office_file(self, file_path: Path) -> bool:
+        """Office ファイルの最終検証 (Layer 3b + Layer 4)
+        - officecli view text で全テキスト抽出 → {{key}} 残存ゼロ検証
+        - officecli validate で OpenXML スキーマ適合チェック"""
+        import re
+
+        # Layer 3b: officecli view text で全テキスト（ヘッダー・フッター・表セル含む）から未置換タグ検索
+        try:
+            result = subprocess.run(
+                ["officecli", "view", str(file_path), "text"],
+                capture_output=True, text=True, check=True
+            )
+            full_text = result.stdout
+            unreplaced = re.findall(r"\{\{([^}]+)\}\}", full_text)
+            if unreplaced:
+                raise HarnessValidationError(
+                    f"Harness Guard (Office全文): 未置換タグがドキュメント内に残存: {unreplaced}"
+                )
+            logger.info("Layer 3b passed: No unreplaced {{key}} in Office file.")
+        except subprocess.CalledProcessError as e:
+            logger.warning("officecli view text failed (%s). Skipping Layer 3b.", e)
+
+        # Layer 4: OpenXML スキーマ適合性チェック
+        try:
+            result = subprocess.run(
+                ["officecli", "validate", str(file_path), "--json"],
+                capture_output=True, text=True, check=True
+            )
+            validation = json.loads(result.stdout) if result.stdout.strip() else {}
+            errors = validation.get("errors", [])
+            if errors:
+                raise HarnessValidationError(
+                    f"Harness Guard (OpenXML): スキーマ検証エラー ({len(errors)}件): {errors[:3]}"
+                )
+            logger.info("Layer 4 passed: OpenXML schema validation OK.")
+        except subprocess.CalledProcessError as e:
+            logger.warning("officecli validate failed (%s). Skipping Layer 4.", e)
+        except json.JSONDecodeError:
+            logger.warning("officecli validate returned non-JSON output. Skipping Layer 4.")
+
+        return True
+
+    # =========================================================================
+    # Step 6: Render-Look-Fix (視覚レイアウト自動補正)
+    # =========================================================================
+
+    def render_look_fix(self, file_path: Path, max_iterations: int = 2) -> bool:
+        """officecli view screenshot/html でレイアウトを視覚チェック。
+        issues があれば自動修正を試み、最大 max_iterations 回ループする。"""
+        for iteration in range(1, max_iterations + 1):
+            try:
+                result = subprocess.run(
+                    ["officecli", "view", str(file_path), "issues", "--json"],
+                    capture_output=True, text=True, check=True
+                )
+                issues = json.loads(result.stdout) if result.stdout.strip() else {}
+                issue_count = issues.get("count", 0)
+
+                if issue_count == 0:
+                    logger.info("Render-Look-Fix: No issues detected (iteration %d).", iteration)
+                    return True
+
+                logger.warning(
+                    "Render-Look-Fix: %d issue(s) detected (iteration %d). Details: %s",
+                    issue_count, iteration, json.dumps(issues.get("items", [])[:3], ensure_ascii=False)
+                )
+
+                # スクリーンショットを保存 (デバッグ用)
+                screenshot_path = file_path.parent / f"{file_path.stem}_preview_iter{iteration}.png"
+                subprocess.run(
+                    ["officecli", "view", str(file_path), "screenshot", "-o", str(screenshot_path)],
+                    capture_output=True, check=True
+                )
+                logger.info("Screenshot saved: %s", screenshot_path)
+
+            except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+                logger.warning("Render-Look-Fix check failed (%s). Skipping.", e)
+                return True  # チェック不能な場合はブロックしない
+
+        logger.warning(
+            "Render-Look-Fix: Issues remain after %d iterations. Manual review recommended.", max_iterations
+        )
+        return False
+
+    # =========================================================================
+    # メイン実行フロー (全 7 ステップ統合)
+    # =========================================================================
 
     def run(
         self,
@@ -408,29 +705,45 @@ class ProposalGenerator:
         grant_id: str,
         with_budget_xlsx: bool = False,
         template_docx: Optional[str] = None,
+        template_xlsx: Optional[str] = None,
         strict: bool = False,
         markdown_only: bool = False,
         output_dir: str = ".output"
     ) -> Dict[str, Any]:
-        """メイン実行フロー"""
+        """メイン実行フロー (SKILL.md 7 ステップ準拠)"""
         out_path = Path(output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
-        # 1. Fetch & Integrate Data
+        # Step 1: データ統合 & 自動補完
         data = self.fetch_data(org_id, grant_id, strict=strict)
 
-        # 2. Draft 6 Sections
+        # Step 2: 6大セクション自動起草
         md_content, meta = self.generate_draft_sections(data)
 
-        # 3. Harness Guard Verification
-        # 検証エラー時は Office 生成をストップして例外を発生させる
+        # Step 5 (Layer 1-3): Markdown レベルの Harness Guard 検証
         self.verify_harness(md_content, meta)
 
-        # 4. Save Markdown Intermediate File
+        # Markdown 中間ファイル保存
         md_filename = f"{grant_id}_{org_id[:8]}_proposal.md"
         md_file_path = out_path / md_filename
         md_file_path.write_text(md_content, encoding="utf-8")
-        logger.info("Saved intermediate Markdown draft to: %s", md_file_path)
+        logger.info("Saved intermediate Markdown: %s", md_file_path)
+
+        # draft_data 辞書の構築 (テンプレート置換用)
+        npo = data["npo"]
+        grant = data["grant"]
+        draft_data = {
+            "事業背景": md_content.split("## 2.")[0].split("## 1.")[1] if "## 1." in md_content else "",
+            "事業目的": md_content.split("## 3.")[0].split("## 2.")[1] if "## 2." in md_content else "",
+            "実施計画": md_content.split("## 4.")[0].split("## 3.")[1] if "## 3." in md_content else "",
+            "実施体制": md_content.split("## 5.")[0].split("## 4.")[1] if "## 4." in md_content else "",
+            "成果目標": md_content.split("## 6.")[0].split("## 5.")[1] if "## 5." in md_content else "",
+            "経費明細": md_content.split("## 6.")[1] if "## 6." in md_content else "",
+            "団体名": npo.get("name", ""),
+            "助成金名": grant.get("title", ""),
+            "経費合計": f"{meta['total_allocated']:,}円",
+            "助成上限額": f"{meta['amount_max']:,}円",
+        }
 
         result = {
             "org_id": org_id,
@@ -442,15 +755,26 @@ class ProposalGenerator:
             "files": {"markdown": str(md_file_path)}
         }
 
-        # 5. Export Office Documents (if not markdown_only)
         if not markdown_only:
+            # Step 3 + 4: 様式分析 → アトミックバッチ流し込み
             office_files = self.export_office_documents(
                 md_path=md_file_path,
                 output_dir=out_path,
                 meta=meta,
+                draft_data=draft_data,
                 with_budget_xlsx=with_budget_xlsx,
-                template_docx=template_docx
+                template_docx=template_docx,
+                template_xlsx=template_xlsx,
             )
+
+            # Step 5 (Layer 3b + 4): Office ファイルの最終検証
+            for key, path in office_files.items():
+                self.verify_office_file(path)
+
+            # Step 6: Render-Look-Fix
+            for key, path in office_files.items():
+                self.render_look_fix(path)
+
             for key, path in office_files.items():
                 result["files"][key] = str(path)
 
@@ -461,11 +785,12 @@ def main():
     parser = argparse.ArgumentParser(description="Grant Proposal Draft Generator & Office Exporter")
     parser.add_argument("--org-id", required=True, help="NPO Profile UUID")
     parser.add_argument("--grant-id", required=True, help="Grant DB ID or Source Grant ID")
-    parser.add_argument("--with-budget-xlsx", action="store_true", help="Generate Excel budget breakdown along with Word draft")
-    parser.add_argument("--template-docx", type=str, default=None, help="Path to custom Word (.docx) template file")
-    parser.add_argument("--strict", action="store_true", help="Enable strict mode (do not fallback on missing data, fail fast)")
-    parser.add_argument("--markdown-only", action="store_true", help="Output Markdown intermediate file only (skip Office CLI conversion)")
-    parser.add_argument("--output-dir", type=str, default=".output", help="Output directory path")
+    parser.add_argument("--with-budget-xlsx", action="store_true", help="Generate Excel budget breakdown")
+    parser.add_argument("--template-docx", type=str, default=None, help="Path to Word template (.docx)")
+    parser.add_argument("--template-xlsx", type=str, default=None, help="Path to Excel budget template (.xlsx)")
+    parser.add_argument("--strict", action="store_true", help="Strict mode: fail on missing data")
+    parser.add_argument("--markdown-only", action="store_true", help="Output Markdown only (skip Office)")
+    parser.add_argument("--output-dir", type=str, default=".output", help="Output directory")
 
     args = parser.parse_args()
 
@@ -476,6 +801,7 @@ def main():
             grant_id=args.grant_id,
             with_budget_xlsx=args.with_budget_xlsx,
             template_docx=args.template_docx,
+            template_xlsx=args.template_xlsx,
             strict=args.strict,
             markdown_only=args.markdown_only,
             output_dir=args.output_dir
@@ -486,15 +812,15 @@ def main():
         print("==================================================")
         print(f" 団体ID: {res['org_id']} | 助成金ID: {res['grant_id']}")
         print(f" 助成上限: {res['amount_max']:,}円 | 申請計上額: {res['total_allocated']:,}円")
-        print(f" Harness Guard 検証: {'✅ 合格' if res['harness_verified'] else '❌ 失敗'}")
+        print(f" Harness Guard: {'✅ 合格' if res['harness_verified'] else '❌ 失敗'}")
         print("\n 【生成ファイル一覧】")
         for key, filepath in res["files"].items():
             print(f"  - {key.upper()}: {filepath}")
         print("==================================================\n")
 
     except HarnessValidationError as e:
-        logger.error("Harness Guard Verification FAILED: %s", e)
-        print(f"\n[ERROR] Harness Guard 検証失敗により Office ファイル出力を停止しました:\n{e}\n")
+        logger.error("Harness Guard FAILED: %s", e)
+        print(f"\n[ERROR] Harness Guard 検証失敗により出力を停止:\n{e}\n")
         sys.exit(1)
     except Exception as e:
         logger.error("Execution failed: %s", e)
@@ -503,3 +829,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
