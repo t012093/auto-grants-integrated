@@ -380,7 +380,7 @@ class ExpenseValidator:
         db_keyword_map: Dict[str, List[str]] = {}
         for rule in rules:
             kw = rule.get("recategory_keywords")
-            if kw is not None:
+            if isinstance(kw, list):
                 db_keyword_map[rule["category_code"]] = kw
 
         if db_keyword_map:

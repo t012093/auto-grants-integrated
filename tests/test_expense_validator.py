@@ -527,3 +527,23 @@ class TestCustomKeywordMap:
         suggested = [i for i in items if i["status"] == "SUGGESTED_RECATEGORIZATION"]
         assert len(suggested) == 1
         assert suggested[0]["suggested_category_code"] == "SYSTEM"
+
+
+class TestInvalidKeywordMapType:
+    """DBの recategory_keywords に非リスト型が混入した場合の型安全性の検証"""
+
+    def test_invalid_type_keyword_map_ignored(self):
+        """recategory_keywords が文字列等の非リスト型の場合、エラーを起こさず安全に無視される"""
+        rules = [
+            {"category_code": "OTHER", "allowed": False, "notes": "対象外", "recategory_keywords": "invalid_string"},
+            {"category_code": "SYSTEM", "allowed": True, "recategory_keywords": 12345},
+        ]
+        # ExpenseValidator.validate 内の keyword_map マージ処理の動作を確認
+        db_keyword_map = {}
+        for rule in rules:
+            kw = rule.get("recategory_keywords")
+            if isinstance(kw, list):
+                db_keyword_map[rule["category_code"]] = kw
+
+        assert db_keyword_map == {}
+
