@@ -107,16 +107,27 @@ class ProposalGenerator:
                     )
                     preferences = cur.fetchall()
 
-                    # 4. Past Awards
-                    cur.execute("SELECT * FROM public.grant_past_awards WHERE grant_id = %s LIMIT 3;", (db_grant_id,))
-                    past_awards = cur.fetchall()
+                    # 4. Past Awards & Track Records
+                    cur.execute("SELECT * FROM public.grant_past_awards WHERE grant_id = %s OR grant_id IS NULL;", (db_grant_id,))
+                    past_award_rows = cur.fetchall()
+
+                    # PastAwardAnalyzer で 5 大視点分析
+                    try:
+                        from skills.past_award_analyzer.scripts.analyze_past_awards import PastAwardAnalyzer
+                    except ImportError:
+                        sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
+                        from skills.past_award_analyzer.scripts.analyze_past_awards import PastAwardAnalyzer
+
+                    analyzer = PastAwardAnalyzer(db_url=self.db_url)
+                    analysis_summary = analyzer.analyze_records(past_award_rows)
 
                     return {
                         "npo": npo,
                         "grant": grant,
                         "rules": rules,
                         "preferences": preferences,
-                        "past_awards": past_awards,
+                        "past_awards": past_award_rows,
+                        "analysis_summary": analysis_summary,
                         "notes": [],
                     }
 
@@ -251,6 +262,19 @@ class ProposalGenerator:
         md_lines.append(f"| 事業統括責任者 | 全体統括、進捗管理、財団連絡窓口 | {npo.get('name')} 代表/理事 |")
         md_lines.append("| 現場PM・コーディネーター | プログラム企画運営、当事者対応 | 専任スタッフ |")
         md_lines.append("| システム・専門アドバイザー | インフラ構築、専門技術指導 | 外部委託・専門家 |")
+        
+        track_recs = npo.get("track_records") or []
+        if isinstance(track_recs, str):
+            try:
+                track_recs = json.loads(track_recs)
+            except:
+                track_recs = []
+        if track_recs:
+            md_lines.append("\n### 過去の助成事業受託・完了実績 (自社トラックレコード)")
+            for rec in track_recs:
+                md_lines.append(f"- **{rec.get('grant_name')}** ({rec.get('award_year')}年 / 交付採択額: {rec.get('award_amount', 0):,}円)")
+                md_lines.append(f"  - 事業名: {rec.get('project_title')}")
+                md_lines.append(f"  - 概要・成果: {rec.get('summary')}\n")
         md_lines.append("")
 
         # 5. 期待される成果 (KPI)
