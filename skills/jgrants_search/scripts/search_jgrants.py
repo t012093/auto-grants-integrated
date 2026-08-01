@@ -257,10 +257,11 @@ async def run_search(
                 g_area = target_detail.get("target_area_search", "") or "全国"
                 subsidy_rate = target_detail.get("subsidy_rate", "") or ""
                 detail_text = target_detail.get("detail", "") or ""
-                combined_text = f"{subsidy_rate} {detail_text}"
-
-                is_10_10 = any(re.search(p, combined_text, re.IGNORECASE) for p in RATE_10_10_PATTERNS)
-                is_advance = any(re.search(p, combined_text, re.IGNORECASE) for p in ADVANCE_PATTERNS)
+                # 10/10・定額判定は補助率フィールドのみ（detail_text の誤マッチ防止）
+                is_10_10 = any(re.search(p, subsidy_rate, re.IGNORECASE) for p in RATE_10_10_PATTERNS)
+                # 概算払い判定は detail_text も含めて検索
+                advance_text = f"{subsidy_rate} {detail_text}"
+                is_advance = any(re.search(p, advance_text, re.IGNORECASE) for p in ADVANCE_PATTERNS)
 
                 # エリアフィルター
                 if area and area not in g_area and "全国" not in g_area:
