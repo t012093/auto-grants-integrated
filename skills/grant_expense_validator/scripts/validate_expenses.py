@@ -29,32 +29,7 @@ load_dotenv(dotenv_path=env_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CATEGORY_LABELS = {
-    "PERSONNEL": "人件費",
-    "TRAVEL": "旅費交通費",
-    "EQUIPMENT": "備品・機器購入費",
-    "OUTSOURCING": "業務委託費",
-    "SYSTEM": "システム開発・クラウド費",
-    "PROMOTION": "広報・印刷製本費",
-    "SUPPLIES": "消耗品・会場費",
-    "OTHER": "その他雑費",
-}
-
-# Auto Recategorization Keyword Mapping (API, LLM, Supabase, DB etc.)
-KEYWORD_RECATEGORY_MAP = {
-    "SYSTEM": [
-        "API", "LLM", "OPENAI", "CLAUDE", "GEMINI",
-        "SUPABASE", "NEON", "DB", "DATABASE", "データベース",
-        "クラウド", "サーバー", "インフラ", "ホスティング",
-        "MODAL", "VERCEL", "AWS", "GCP", "SAAS", "GPU", "開発"
-    ],
-    "PROMOTION": [
-        "チラシ", "印刷", "広告", "パンフレット", "ポスター", "WEB広告", "動画", "PR"
-    ],
-    "OUTSOURCING": [
-        "講師", "謝礼", "委託", "コンサル", "デザイン依頼", "外部開発", "エンジニア"
-    ],
-}
+from constants import CATEGORY_LABELS, KEYWORD_RECATEGORY_MAP
 
 
 class HarnessGuardError(Exception):

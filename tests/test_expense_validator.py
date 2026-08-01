@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skills" / "grant_expense_validator" / "scripts"))
 
 from validate_expenses import ConstraintSolver, HarnessGuardError
+from constants import KEYWORD_RECATEGORY_MAP
 
 
 # ---------------------------------------------------------------------------
@@ -305,3 +306,41 @@ class TestHarnessGuardCatchesOverflow:
         ]
         # 例外が発生しないことを確認（上限ちょうどは OK）
         ConstraintSolver._verify_harness_guard(valid_items, 1_000_000)
+
+
+class TestKeywordRecategorizationFromConstants:
+    """振替キーワードが constants.py の定義と整合していることを検証"""
+
+    @pytest.mark.parametrize("target_cat", list(KEYWORD_RECATEGORY_MAP.keys()))
+    def test_each_category_keyword_triggers_recategorization(self, target_cat):
+        """各振替先カテゴリの先頭キーワードで振替が発火する"""
+        first_keyword = KEYWORD_RECATEGORY_MAP[target_cat][0]
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule(target_cat, allowed=True),
+        ]
+        prefs = [
+            make_pref("OTHER", 1, 100_000, notes=f"費用: {first_keyword}"),
+        ]
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs
+        )
+        other = next(i for i in items if i["category_code"] == "OTHER")
+        assert other["status"] == "SUGGESTED_RECATEGORIZATION"
+        assert other["suggested_category_code"] == target_cat
+
+    def test_unknown_keyword_does_not_trigger(self):
+        """キーワードリストに無い文言では振替提案されない"""
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule("SYSTEM", allowed=True),
+        ]
+        prefs = [
+            make_pref("OTHER", 1, 100_000, notes="ランチ代金"),
+        ]
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs
+        )
+        other = next(i for i in items if i["category_code"] == "OTHER")
+        assert other["status"] == "EXCLUDED"
+
