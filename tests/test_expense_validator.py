@@ -344,3 +344,127 @@ class TestKeywordRecategorizationFromConstants:
         other = next(i for i in items if i["category_code"] == "OTHER")
         assert other["status"] == "EXCLUDED"
 
+
+# ===========================================================================
+# エッジケーステスト (カバレッジ補完)
+# ===========================================================================
+
+
+class TestRecategorizationTargetHasLimit:
+    """振替先に max_limit/max_ratio がある場合、振替額が制限される"""
+
+    def test_target_max_limit_caps_recategorization(self):
+        """振替先 SYSTEM に max_limit=150k があり、振替元 OTHER の 300k が制限される"""
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule("SYSTEM", allowed=True, max_limit=150_000),
+        ]
+        prefs = [
+            make_pref("OTHER", 1, 300_000, notes="API利用料"),
+        ]
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs
+        )
+        system_items = [i for i in items if i["category_code"] == "SYSTEM" and i["status"] == "APPROVED"]
+        assert len(system_items) == 1
+        # max_limit=150k なので 300k ではなく 150k に制限される
+        assert system_items[0]["allocated_amount"] == 150_000
+
+    def test_target_max_ratio_caps_recategorization(self):
+        """振替先 SYSTEM に max_ratio=0.1 (=100k) があり、振替額が制限される"""
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule("SYSTEM", allowed=True, max_ratio=0.1),
+        ]
+        prefs = [
+            make_pref("OTHER", 1, 500_000, notes="クラウド費用"),
+        ]
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs
+        )
+        system_items = [i for i in items if i["category_code"] == "SYSTEM" and i["status"] == "APPROVED"]
+        assert len(system_items) == 1
+        assert system_items[0]["allocated_amount"] == 100_000
+
+
+class TestMultipleRecategorizationsToSameTarget:
+    """複数振替元 → 同一振替先への合算"""
+
+    def test_two_sources_merge_to_one_target(self):
+        """OTHER と TRAVEL の両方が SYSTEM へ振替提案され、合算される"""
+        rules = [
+            make_rule("OTHER", allowed=False, notes="対象外"),
+            make_rule("TRAVEL", allowed=False, notes="旅費対象外"),
+            make_rule("SYSTEM", allowed=True),
+        ]
+        prefs = [
+            make_pref("OTHER", 1, 200_000, notes="API利用料"),
+            make_pref("TRAVEL", 2, 100_000, notes="サーバー出張"),
+        ]
+        items, _, _, _ = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs
+        )
+        system_items = [i for i in items if i["category_code"] == "SYSTEM" and i["status"] == "APPROVED"]
+        # 2件の振替が SYSTEM に新規APPROVED として追加される（最初の振替で作成、2番目は既存に加算）
+        total_system = sum(i["allocated_amount"] for i in system_items)
+        assert total_system == 300_000  # 200k + 100k
+
+
+class TestAllCategoriesExcluded:
+    """全カテゴリが allowed=False の場合"""
+
+    def test_all_excluded_returns_empty_allocation(self):
+        rules = [
+            make_rule("PERSONNEL", allowed=False, notes="対象外"),
+            make_rule("SYSTEM", allowed=False, notes="対象外"),
+        ]
+        prefs = [
+            make_pref("PERSONNEL", 1, 500_000),
+            make_pref("SYSTEM", 2, 300_000),
+        ]
+        items, remaining, _, auto_filled = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs
+        )
+        # 全項目が EXCLUDED で配分額は 0
+        assert all(i["status"] == "EXCLUDED" for i in items)
+        assert all(i["allocated_amount"] == 0 for i in items)
+        assert remaining == 1_000_000
+        assert not auto_filled
+
+
+class TestEmptyPreferences:
+    """preferences が空で rules のみの場合"""
+
+    def test_no_preferences_returns_empty_items(self):
+        rules = [
+            make_rule("PERSONNEL"),
+            make_rule("SYSTEM"),
+        ]
+        items, remaining, _, auto_filled = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=[]
+        )
+        assert items == []
+        assert remaining == 1_000_000
+        assert not auto_filled
+
+
+class TestAutoFillAlreadyFullCoverage:
+    """auto_fill=True だが既に 100% 達成済みの場合"""
+
+    def test_auto_fill_not_applied_when_already_full(self):
+        rules = [
+            make_rule("PERSONNEL"),
+        ]
+        prefs = [
+            make_pref("PERSONNEL", 1, 1_000_000),
+        ]
+        items, remaining, _, auto_filled = ConstraintSolver.solve(
+            grant_amount_max=1_000_000, rules=rules, preferences=prefs, auto_fill=True
+        )
+        personnel = next(i for i in items if i["category_code"] == "PERSONNEL")
+        assert personnel["allocated_amount"] == 1_000_000
+        assert remaining == 0
+        # 希望額で既に100%なので auto-fill は発動しない
+        assert auto_filled is False
+
+

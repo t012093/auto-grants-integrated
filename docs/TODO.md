@@ -23,8 +23,8 @@
 
 ## テストカバレッジの穴
 
-- [ ] 振替先に `max_limit`/`max_ratio` がある場合、振替額が制限される挙動
-- [ ] 複数振替元 → 同一振替先で合算される場合
-- [ ] 全カテゴリ `allowed=False` の場合（全除外時の挙動）
-- [ ] `preferences=[]`（空）で rules のみ実行した場合
-- [ ] `auto_fill=True` で既に 100% 達成済みの場合、`auto_fill_applied=False` の確認
+- [x] 振替先に `max_limit`/`max_ratio` がある場合、振替額が制限される挙動
+- [x] 複数振替元 → 同一振替先で合算される場合
+- [x] 全カテゴリ `allowed=False` の場合（全除外時の挙動）
+- [x] `preferences=[]`（空）で rules のみ実行した場合
+- [x] `auto_fill=True` で既に 100% 達成済みの場合、`auto_fill_applied=False` の確認
