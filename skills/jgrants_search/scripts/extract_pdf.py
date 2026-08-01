@@ -326,30 +326,8 @@ async def main_async():
                                 logger.error(f"Failed to fetch PDF from {target_url}: {e}")
 
     if not pdf_bytes:
-        # モック PDF の作成 (テスト用・日本語対応)
-        doc = fitz.open()
-        page = doc.new_page()
-        sample_text = (
-            "令和8年度 地域デジタルコミュニティ活性化助成金 公募要領\n\n"
-            "■ 提出必須書類\n"
-            "1. 定款 または会則 (ARTICLES)\n"
-            "2. 直近の 決算 書（収支報告書） (FINANCIAL_REPORT)\n"
-            "3. 役員名簿 (BOARD_LIST)\n"
-            "4. 履歴事項全部証明書（ 登記簿 謄本） (REGISTRY_CERTIFICATE)\n\n"
-            "■ 対象経費および注意点\n"
-            "- システム 開発費、 広報 費、 備品 費、 旅費 、 人件費 は対象となります。\n"
-            "- 人件費 は総事業費の 50% 以内とします。\n"
-            "- 飲食費および懇親会費は対象外とします。\n\n"
-            "■ 事業対象期間\n"
-            "令和8年4月1日〜令和9年3月31日\n"
-        )
-        # 日本語標準フォントの指定
-        font_name = "japan"
-        page.insert_textbox(fitz.Rect(50, 50, 550, 750), sample_text, fontname=font_name, fontsize=11)
-        pdf_bytes = doc.tobytes()
-        doc.close()
-        pdf_name = "generated_sample_guideline.pdf"
-        logger.info("Created sample in-memory PDF with Japanese font for processing.")
+        logger.error("PDF が取得できませんでした。--pdf-path でローカルファイルを指定するか、DBに attachment_urls を登録してください。")
+        sys.exit(1)
 
     result = extractor.process_pdf(args.grant_id, pdf_bytes, pdf_name)
 
