@@ -7,7 +7,21 @@ description: ハーネス検証済みの経費ポートフォリオ・17項目�
 
 ## 概要
 
-要件適合チェック (`grant_eligibility_checker`) および経費最適化 (`grant_expense_validator`) を通過したデータと、過去採択事例の勝因パターン (`past_award_analyzer`) を統合し、申請書の主要セクションを自動起草します。生成した原稿は `officecli` を経由して Word (`.docx`) および Excel (`.xlsx`) 形式にエクスポートします。
+要件適合チェック (`grant_eligibility_checker`) および経費最適化 (`grant_expense_validator`) を通過したデータと、過去採択事例の勝因パターン (`past_award_analyzer`) を統合し、申請書の主要 6 大セクションを自動起草します。生成した原稿は `officecli` を経由して提出用 Word (`.docx`) および Excel (`.xlsx`) 形式に自動エクスポートします。
+
+---
+
+## 🏗️ 設計思想: ノンインタラクティブ & 安全フォールバック原則
+
+自動化パイプライン (CLIバッチ, Webシステム, Cron) での連続実行を止めないため、以下の設計原則を適用します。
+
+1. **デフォルト自動補完 (ノンインタラクティブ完走)**:
+   - 過去採択事例データが 0 件の場合 ➡ 同ジャンル助成金の「標準成果目標 (参加者数・満足度等)」を自動生成して適用。
+   - NPO希望経費が未設定の場合 ➡ デフォルト標準配分 (人件費50%, システム費30%, 広報費20%) で自動補完。
+2. **自動補完注記の明示**:
+   - 自動補完された項目は、出力原稿 (Markdown/Word) 内に `💡 [自動補完注記: 過去採択事例未登録のため標準KPIを補完]` のように明記し、人間による追推稿・確認を容易にする。
+3. **厳格モード (`--strict`) のサポート**:
+   - オプション `--strict` を指定した場合のみ、データ不足時に自動補完を行わずエラー表示で処理を中断する。
 
 ---
 
@@ -19,15 +33,23 @@ description: ハーネス検証済みの経費ポートフォリオ・17項目�
 #### 実行方法
 
 ```bash
-# 申請書ドラフトを Word 形式で生成
+# 基本実行 (フリーフォーマット Word ファイルを生成)
 uv run skills/grant_form_filler/scripts/generate_proposal_docx.py \
   --org-id "org-uuid-1234" --grant-id "g-456"
 
-# 経費明細を Excel 形式で同時生成
+# 経費明細 Excel (.xlsx) を同時生成
 uv run skills/grant_form_filler/scripts/generate_proposal_docx.py \
   --org-id "org-uuid-1234" --grant-id "g-456" --with-budget-xlsx
 
-# Markdown 中間ファイルのみ出力（Office 変換なし）
+# 指定様式テンプレート (.docx) を使用して {{key}} をプレースホルダー置換
+uv run skills/grant_form_filler/scripts/generate_proposal_docx.py \
+  --org-id "org-uuid-1234" --grant-id "g-456" --template-docx "./templates/form.docx"
+
+# データ不足時に自動補完を行わずエラー終了する厳格モード
+uv run skills/grant_form_filler/scripts/generate_proposal_docx.py \
+  --org-id "org-uuid-1234" --grant-id "g-456" --strict
+
+# Markdown 中間ファイルのみ出力 (Office 変換なし)
 uv run skills/grant_form_filler/scripts/generate_proposal_docx.py \
   --org-id "org-uuid-1234" --grant-id "g-456" --markdown-only
 ```
@@ -38,40 +60,45 @@ uv run skills/grant_form_filler/scripts/generate_proposal_docx.py \
 
 | パラメーター | 型 | 説明 | 使用例 |
 |---|---|---|---|
-| `--org-id` | `string` | 登録団体 UUID | `--org-id "org-uuid-1234"` |
-| `--grant-id` | `string` | 対象助成金 ID | `--grant-id "g-456"` |
-| `--with-budget-xlsx` | `flag` | 経費明細 Excel を同時生成 | `--with-budget-xlsx` |
+| `--org-id` | `string` | 登録団体 UUID (必須) | `--org-id "org-uuid-1234"` |
+| `--grant-id` | `string` | 対象助成金 ID (必須) | `--grant-id "g-456"` |
+| `--with-budget-xlsx` | `flag` | 経費明細 Excel (.xlsx) を同時生成 | `--with-budget-xlsx` |
+| `--template-docx` | `string` | 指定様式 Word テンプレートファイルパス（未指定時はパターンAのフリーフォーマット生成） | `--template-docx "./template.docx"` |
+| `--strict` | `flag` | データ未登録時に自動補完を行わずエラー中断する厳格モード | `--strict` |
 | `--markdown-only` | `flag` | Markdown 中間ファイルのみ出力 | `--markdown-only` |
 | `--output-dir` | `string` | 出力先ディレクトリ（デフォルト: `.output/`） | `--output-dir "./proposals"` |
 
 ---
 
-## 自動起草セクション (SOP)
+## 自動起草プロシージャ (SOP)
 
-### Step 1: 入力データの統合
-以下のデータソースを統合して申請原稿の素材を構成します。
+### Step 1: 入力データの統合 & 自動補完
+以下のデータソースを統合して申請原稿の素材を構成します（不足データはデフォルト補完）。
 
-| データソース | 使用内容 |
-|---|---|
-| `npo_profiles` | 団体名、活動概要、実績、活動分野タグ |
-| `grants` | 助成金名、目的、対象要件、公募要領テキスト |
-| `grant_expense_rules` + `npo_expense_preferences` | 最適化済み経費ポートフォリオ |
-| `grant_past_awards` (分析済み) | 勝因パターン・KPI 相場・タイトル提案 |
+| データソース | 使用内容 | データ未登録時の自動補完動作 |
+|---|---|---|
+| `npo_profiles` | 団体名、活動概要、実績、活動分野 | 団体基本情報から概略文を自動補完 |
+| `grants` | 助成金名、目的、対象要件、公募要領テキスト | タイトル・公募内容よりテキスト抽出 |
+| `grant_expense_rules` + `npo_expense_preferences` | 最適化済み経費ポートフォリオ | デフォルト配分 (人件費50%, システム費30%, 広報費20%) で補完 |
+| `grant_past_awards` (分析済み) | 勝因パターン・KPI 相場・タイトル提案 | 同ジャンル標準成果目標 (参加者数・満足度等) で補完 |
 
-### Step 2: 申請書セクション自動起草
-以下の主要セクションを LLM で起草します。各セクションには公募要領からの引用根拠を付与。
+### Step 2: 申請書 6 大セクション自動起草
+公募要領からの原文引用を根拠として以下の標準スタイルで付与し、主要セクションを自動起草します。
+> **【公募要領 引用】** 「本助成金は地域コミュニティのデジタル化を推進し、持続可能な活動基盤を構築することを目的とします。」
 
-1. **事業の背景・社会的課題**: 地域統計データや当事者ニーズを引用
+1. **事業の背景・社会的課題**: 地域統計データや当事者ニーズ、公募要領の原文引用
 2. **事業目的**: 助成金の趣旨と団体ミッションの合致点を明示
-3. **実施計画・スケジュール**: 月別の活動計画表
-4. **実施体制**: 団体メンバー・連携先の役割分担
-5. **期待される成果 (KPI)**: 過去採択事例の相場を参考にした定量目標
-6. **経費明細 (自動計算済み)**: Solver 確定済みの経費ポートフォリオをそのまま転記
+3. **実施計画・月別スケジュール**: 助成期間に応じた活動計画表。※要綱に明確な事業期間の記載がない場合は、標準12ヶ月間 (4月〜翌3月) で仮起草し、`💡 [要確認: 公募要領に事業期間の明確な記載がないため、標準12ヶ月間 (4月〜翌3月) として仮生成しています。正式な事業対象期間を確認してください]` の【要確認注記】を自動付与。
+4. **実施体制**: 団体メンバー・連携パートナーの役割分担表
+5. **期待される成果 (KPI)**: 過去採択相場（未登録時は標準目標）に合わせた定量成果
+6. **経費明細 (自動計算済み)**: Solver 確定済みの経費ポートフォリオをハルシネーション0%でそのまま転記
 
-### Step 3: ハーネス検証 & Office 出力
-* **Harness Guard**: 経費合計の算術一致・必須セクションの存在を最終検証。
-* **Word 出力**: `officecli add <file>.docx /body --type markdown --prop src=draft.md`
-* **Excel 出力**: `officecli import <file>.xlsx "/sheet[1]" budget.csv`
+### Step 3: ハーネス検証 & Office エクスポート
+* **Harness Guard**: 経費合計の算術一致・必須6大セクションの存在を自動検証。検証エラー時はエラーログを表示してファイル生成をストップ。
+* **Word 出力 (パターン A / B)**:
+  - **パターン A (デフォルト)**: `officecli create` + `officecli add <file>.docx /body --type markdown --prop src=draft.md` で美しい段落・見出しの Word を新規構築。
+  - **パターン B (`--template-docx` 指定時)**: テンプレート内の `{{事業目的}}`, `{{経費明細}}` などを `officecli merge` でプレースホルダー置換。
+* **Excel 出力**: 5 カラム（経費区分, 項目名, 希望額, 助成対象決定額, 充当理由）構成で `officecli import` または `openpyxl` 経由でエクスポート。
 
 ---
 
