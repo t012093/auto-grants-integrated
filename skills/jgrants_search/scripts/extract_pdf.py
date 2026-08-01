@@ -252,7 +252,15 @@ class PDFExtractor:
                 row = cur.fetchone()
                 existing_detail = row[0] if row and row[0] else ""
 
-                updated_detail = f"{existing_detail}\n\n=== 【公募要領 PDF パース本文 ({pdf_name})】 ===\n{extracted_text}".strip()
+                # 既存パース区間があれば置換、なければ追記（冪等性保証）
+                pdf_section_marker = "=== 【公募要領 PDF パース本文"
+                if pdf_section_marker in existing_detail:
+                    marker_pos = existing_detail.index(pdf_section_marker)
+                    base_detail = existing_detail[:marker_pos].strip()
+                else:
+                    base_detail = existing_detail
+
+                updated_detail = f"{base_detail}\n\n=== 【公募要領 PDF パース本文 ({pdf_name})】 ===\n{extracted_text}".strip()
 
                 cur.execute(
                     """
@@ -294,7 +302,7 @@ class PDFExtractor:
 
 async def main_async():
     parser = argparse.ArgumentParser(description="PyMuPDF 公募要領 PDF パース CLI")
-    parser.add_argument("--grant-id", type=int, default=1, help="対象助成金の DB ID")
+    parser.add_argument("--grant-id", type=int, required=True, help="対象助成金の DB ID")
     parser.add_argument("--pdf-path", type=str, help="ローカル指定 PDF パス")
     parser.add_argument("--json", action="store_true", help="結果を JSON 出力")
 
