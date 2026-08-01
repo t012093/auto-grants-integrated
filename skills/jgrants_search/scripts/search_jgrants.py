@@ -217,7 +217,7 @@ async def run_search(
     headers = {"User-Agent": "AutoGrantsBot/1.0", "Accept": "application/json"}
 
     # キーワード横断取得ロジック
-    search_keywords = [keyword] if keyword else ["事業", "補助金", "助成金", "支援"]
+    search_keywords = [keyword] if keyword else ["助成金", "補助金", "支援"]
     list_items = []
     seen_ids = set()
 
@@ -335,13 +335,14 @@ async def run_search(
 def main():
     parser = argparse.ArgumentParser(description="jGrants 公式 API 条件検索 CLI")
     parser.add_argument("--keyword", type=str, default="", help="検索キーワード (未指定時は主要語で自動横断取得)")
-    parser.add_argument("--area", type=str, default="", help="対象地域 (例: 富山県, 東京都, 全国)")
-    parser.add_argument("--rate-10-10", action="store_true", help="補助率 10/10 (全額補助・定額) のみに絞り込む")
+    parser.add_argument("--area", type=str, default="全国", help="対象地域 (例: 富山県, 東京都, 全国)")
+    parser.add_argument("--rate-10-10", action="store_true", default=True, help="補助率 10/10 (全額補助・定額) のみに絞り込む")
+    parser.add_argument("--no-rate-10-10", action="store_false", dest="rate_10_10", help="10/10 フィルタを無効化")
     parser.add_argument("--advance-payment", action="store_true", help="概算払い・前払い記載のあるものに絞り込む")
     parser.add_argument("--min-amount", type=int, default=None, help="助成上限額の下限 (円)")
     parser.add_argument("--max-amount", type=int, default=None, help="助成上限額の上限 (円)")
 
-    parser.add_argument("--limit", type=int, default=10, help="表示件数の上限")
+    parser.add_argument("--limit", type=int, default=30, help="表示件数の上限")
     parser.add_argument("--save-db", action="store_true", help="検索結果を自社 DB (public.grants) に自動 Upsert 保存")
     parser.add_argument("--json", action="store_true", help="JSON 形式で結果を出力")
 
