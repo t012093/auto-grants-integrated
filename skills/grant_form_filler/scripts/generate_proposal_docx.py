@@ -299,7 +299,7 @@ class ProposalGenerator:
         }
 
         # 1. 全段落をスキャンして {{key}} マーカーを検索
-        paragraphs = self._officecli_query(template_path, "//p")
+        paragraphs = self._officecli_query(template_path, "paragraph")
         for node in paragraphs:
             text = node.get("text", "")
             match = re.search(r"\{\{\s*(.*?)\s*\}\}", text)
@@ -336,13 +336,15 @@ class ProposalGenerator:
         return profile
 
     def _officecli_query(self, file_path: str, selector: str) -> List[Dict]:
-        """officecli query を --json で実行し、結果ノードのリストを返す"""
+        """officecli query を --json で実行し、data.results 配列を返す。
+        officecli query の JSON 形式: {"success": true, "data": {"matches": N, "results": [...]}}"""
         try:
             result = subprocess.run(
                 ["officecli", "query", file_path, selector, "--json"],
                 capture_output=True, text=True, check=True
             )
-            return json.loads(result.stdout) if result.stdout.strip() else []
+            res = json.loads(result.stdout) if result.stdout.strip() else {}
+            return res.get("data", {}).get("results", [])
         except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as e:
             logger.warning("officecli query failed for selector '%s': %s", selector, e)
             return []
@@ -634,20 +636,22 @@ class ProposalGenerator:
             logger.warning("officecli view text failed (%s). Skipping Layer 3b.", e)
 
         # Layer 4: OpenXML スキーマ適合性チェック
+        # officecli validate の JSON 形式:
+        #   成功時: {"success": true, "data": "Validation passed: ...", "message": "..."}
+        #   失敗時: {"success": false, "error": {...}} + 終了コード 1
         try:
             result = subprocess.run(
                 ["officecli", "validate", str(file_path), "--json"],
-                capture_output=True, text=True, check=True
+                capture_output=True, text=True, check=False
             )
             validation = json.loads(result.stdout) if result.stdout.strip() else {}
-            errors = validation.get("errors", [])
-            if errors:
+            success = validation.get("success", True)
+            error_detail = validation.get("error") or validation.get("errors")
+            if not success or error_detail or result.returncode != 0:
                 raise HarnessValidationError(
-                    f"Harness Guard (OpenXML): スキーマ検証エラー ({len(errors)}件): {errors[:3]}"
+                    f"Harness Guard (OpenXML): スキーマ検証エラー: {error_detail or result.stderr}"
                 )
             logger.info("Layer 4 passed: OpenXML schema validation OK.")
-        except subprocess.CalledProcessError as e:
-            logger.warning("officecli validate failed (%s). Skipping Layer 4.", e)
         except json.JSONDecodeError:
             logger.warning("officecli validate returned non-JSON output. Skipping Layer 4.")
 
@@ -666,8 +670,11 @@ class ProposalGenerator:
                     ["officecli", "view", str(file_path), "issues", "--json"],
                     capture_output=True, text=True, check=True
                 )
-                issues = json.loads(result.stdout) if result.stdout.strip() else {}
-                issue_count = issues.get("count", 0)
+                # officecli view issues の JSON 形式:
+                # {"success": true, "data": {"count": N, "issues": [...]}}
+                res = json.loads(result.stdout) if result.stdout.strip() else {}
+                issues_data = res.get("data", {})
+                issue_count = issues_data.get("count", 0)
 
                 if issue_count == 0:
                     logger.info("Render-Look-Fix: No issues detected (iteration %d).", iteration)
@@ -675,7 +682,7 @@ class ProposalGenerator:
 
                 logger.warning(
                     "Render-Look-Fix: %d issue(s) detected (iteration %d). Details: %s",
-                    issue_count, iteration, json.dumps(issues.get("items", [])[:3], ensure_ascii=False)
+                    issue_count, iteration, json.dumps(issues_data.get("issues", [])[:3], ensure_ascii=False)
                 )
 
                 # スクリーンショットを保存 (デバッグ用)

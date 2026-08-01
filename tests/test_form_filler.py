@@ -119,9 +119,9 @@ class TestTemplateAnalysis:
         import json
         generator = ProposalGenerator(db_url=None)
 
-        # officecli query //p がマーカー付き段落を返すようモック
+        # officecli query "paragraph" がマーカー付き段落を返すようモック
         def mock_query(file_path, selector):
-            if selector == "//p":
+            if selector == "paragraph":
                 return [
                     {"path": "/body/p[1]", "text": "{{事業背景}}"},
                     {"path": "/body/p[2]", "text": "{{事業目的}}"},
