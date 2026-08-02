@@ -21,13 +21,22 @@ import sys
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-import psycopg
-from dotenv import load_dotenv
+try:
+    import psycopg
+    HAS_PSYCOPG = True
+except ImportError:
+    HAS_PSYCOPG = False
+    psycopg = None
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("past_award_analyzer")
 
-load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # 課題・テーマキーワードパターン
@@ -121,7 +130,7 @@ class PastAwardAnalyzer:
 
     def fetch_records_from_db(self, grant_id: int) -> List[Dict[str, Any]]:
         """DB の public.grant_past_awards から対象助成金の過去事例を取得"""
-        if not self.db_url:
+        if not HAS_PSYCOPG or not self.db_url:
             return []
 
         with psycopg.connect(self.db_url) as conn:
@@ -147,8 +156,8 @@ class PastAwardAnalyzer:
         if not isinstance(data_list, list):
             data_list = [data_list]
 
-        if not self.db_url:
-            logger.info("DATABASE_URL not configured. Skipping DB insert.")
+        if not HAS_PSYCOPG or not self.db_url:
+            logger.info("psycopg is not installed or DATABASE_URL not configured. Skipping DB insert.")
             return len(data_list)
 
         saved_count = 0

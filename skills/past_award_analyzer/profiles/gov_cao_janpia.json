@@ -1,0 +1,20 @@
+{
+  "source_id": "gov_cao_janpia",
+  "source_name": "一般社団法人 日本資金決済推進機構 / 休眠預金 JANPIA",
+  "category": "GOVERNMENT_AGENCY",
+  "acquisition_method": "crawl4ai_camoufox",
+  "url": "https://www.janpia.or.jp/grant/",
+  "selectors": {
+    "list_selector": "table.grant-table tbody tr, div.grant-list-item",
+    "title_selector": "td.title, a.grant-title",
+    "url_selector": "a[href]",
+    "deadline_selector": "td.period, span.date",
+    "provider_selector": null,
+    "provider_default": "JANPIA 休眠預金活用事業",
+    "detail_body_selector": "div.grant-detail-content"
+  },
+  "quality_gate": {
+    "required_fields": ["title", "provider", "url"],
+    "min_coverage": 0.90
+  }
+}

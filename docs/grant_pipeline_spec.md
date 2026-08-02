@@ -203,10 +203,15 @@ skills/
 
 ---
 
-## 8. 過去採択事例の 5 大視点分析 (`past_award_analyzer`)
+## 8. 過去採択事例の 5 大視点分析 & 実Web自動収集 (`past_award_analyzer`)
 
 ### 目的
-対象助成金の過去の採択事例 (`public.grant_past_awards`) を収集・分析し、審査員が高く評価する「勝因パターン」を抽出して自社申請案に反映します。
+対象助成金の過去の採択事例 (`public.grant_past_awards`) を自動収集 (`crawl_past_awards.py`)・分析 (`analyze_past_awards.py`) し、審査員が高く評価する「勝因パターン」を抽出して自社申請案に反映します。
+
+### 付属スクリプト & ディレクトリ構成
+* `skills/past_award_analyzer/scripts/crawl_past_awards.py`: 実Webサイト・PDFから過年度採択結果をクロールし、数値・テキストを正規化して DB へ Upsert 保存。
+* `skills/past_award_analyzer/scripts/analyze_past_awards.py`: DB 内事例の 5大視点分析および自社プロファイルとの勝因ギャップ診断。
+* `skills/past_award_analyzer/profiles/*.json`: 各財団・行政サイト用 DOM/CSS セレクター設定ファイル。
 
 ### 5 大分析視点
 1. **課題設定の切り口** (Problem Framing): どんな社会的課題を提示したか
@@ -216,9 +221,10 @@ skills/
 5. **審査評・選定理由** (Evaluator Feedback): 財団・行政の評価コメント
 
 ### 分析ワークフロー
-1. `grant_past_awards_list(grant_id)` で過去 3 年分の採択事例を取得。
-2. `grant_past_award_analysis_run(award_ids)` で 5 大視点クラスタリングを実行。
-3. 自社プロファイルとの勝因ギャップを算出し、改善アドバイスを生成。
+1. `crawl_past_awards.py --profile <profile> --save-db` で対象財団の過去採択事例を DB へ集約。
+2. `grant_past_awards_list(grant_id)` または `analyze_past_awards.py --grant-id <id>` で過去事例を取得。
+3. `grant_past_award_analysis_run(grant_id)` で 5 大視点クラスタリングを実行。
+4. 自社プロファイルとの勝因ギャップを算出し、`grant_form_filler` にて申請書原稿へ自動反映。
 
 ---
 
