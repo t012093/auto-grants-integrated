@@ -73,7 +73,7 @@ class NPOProfileEmbedder:
         # Batch encode all chunk contents for this NPO (high throughput)
         chunk_types = [c[0] for c in chunks]
         contents = [c[1] for c in chunks]
-        embeddings = self.model.encode(contents)
+        embeddings = self.model.encode(contents, normalize_embeddings=True)
 
         saved_count = 0
         for chunk_type, content, vec in zip(chunk_types, contents, embeddings):

@@ -1063,69 +1063,30 @@ RAG適合判定時に、LLM (Gemini/Claude) を用いて助成金に対する団
 ```
 
 
-## 6.5 17項目ハイブリッド 6段階動的検問ゲート (6-Stage Agentic Gate System) 詳細設計
+## 6.5 助成金要件適合チェッカー (check_eligibility.py) 詳細設計
 
-登録団体のプロファイル情報・実ドキュメント (`public.npo_profiles`, `public.npo_documents`, `public.npo_knowledge_chunks`) と助成金データ (`public.grants`, `public.knowledge_chunks`) を受け取り、全6段階の動的検問ゲートで判定を行うモジュール `skills/grant_eligibility_checker/scripts/check_eligibility.py` の物理詳細設計。
+登録団体のプロファイル (`public.npo_profiles`, `public.npo_knowledge_chunks`) と助成金データ (`public.grants`, `public.knowledge_chunks`) を受け取り、3段階ハイブリッド判定を行うモジュールの物理詳細設計。
 
-### 6.5.1 6段階検問フロー & アーキテクチャ
+> [!NOTE]
+> 詳細仕様は [skills/grant_eligibility_checker/spec.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_eligibility_checker/spec.md) を正本とする。
 
-```text
-[公募助成金] ──► [検問1: 基本要件 (SQL)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
-                 │ PASS
-                 ▼
-                [検問2: 拠点要件 (多重)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
-                 │ PASS
-                 ▼
-                [検問3: 予算規模 (50%上限)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
-                 │ PASS
-                 ▼
-                [検問4: 多軸分野適合]    ──► FAIL ➔ 🔴 不適合 (Min Score < 0.55)
-                 │ PASS
-                 ▼
-                [検問5: 特定要件動的 RAG]──► FAIL ➔ 🔴 不適合 / WARN ➔ 🟡 条件付き適合
-                 │ (助成金要件文 ➔ NPOチャンクへ正方向ベクトル検索 ➔ ページ番号引用 ➔ AI理由判定)
-                 ▼
-                [検問6: 書類準備率]      ──► WARN ➔ 🟡 要書類手配
-                 │ PASS
-                 ▼
-                🟢 完全適合 (ELIGIBLE: 全検問クリア)
-```
+### 6.5.1 現行 3-Stage 判定フロー
 
-### 6.5.2 データベース DDL & 書類3層保存設計
+Stage 1（確定ルール判定 5項目）→ Stage 2（書類差分チェック）→ Stage 3（セマンティック判定 8軸）の順次通過型構造。Stage 1 で 1 項目でも不合格の場合、即 FAIL とし後続ステージをスキップする。Stage 1 通過後は `total_score = Stage2 * 0.4 + Stage3 * 0.6` で算出し、70点以上で PASS。
 
-1. **`public.npo_documents` (書類メタデータ管理)**:
-   - 実ファイル階層 (`storage/npo_documents/<npo_id>/<doc_type>/...`) とDBの紐付け。
-   - 発行日 (`issued_date`) による登記簿3ヶ月制限等の自動検問。
-2. **`public.knowledge_chunks` のページ番号保持**:
-   - `page_number` (INTEGER) を保持し、判定理由から `file:///path/to/grant_guide.pdf#page=3` への直リンクを出力。
-3. **`public.npo_knowledge_chunks` の制約緩和**:
-   - UNIQUE制約 `uq_npo_chunk_type` を解除し、実績・資格・定款などの複数チャンク保存を解禁。
-4. **`public.alerts` レポート保存構造**:
-   - `overall_status` (`ELIGIBLE` | `CONDITIONAL` | `INELIGIBLE`), `report_json` (JSONB), `failed_gate_codes` (TEXT[])。
+### 6.5.2 DB 保存
+- `public.alerts` テーブルに `(npo_profile_id, grant_id, alert_type, title, message, match_score)` で Upsert。
+- 制約 `uq_alerts_npo_grant_type` による ON CONFLICT 更新。
 
----
+### 6.5.3 Phase 2 将来拡張計画
+以下は現行実装には含まれない将来拡張である。実装着手前に個別の詳細設計を行うこと。
 
-## 7. フロントエンド API エンドポイント仕様 (Single Source of Truth)
-
-詳細な API 定義（リクエスト/レスポンス、共通仕様、書き込み系エンドポイント、Pydantic モデル定義など）については、一元管理されている [api_contract.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/docs/api_contract.md) を参照してください。
-
-本詳細設計書内の各機能モジュールは、すべて上記の `api_contract.md` に定義されたエンドポイント契約に準拠して動作します。
-
----
-
-## 8. 申請書・提案書作成詳細設計 (`proposal_generator.py`)
-
-Excel/Word原本テンプレートへの自動マッピング、および自治体総合計画等を行政文書GraphRAGで解析・エビデンス参照し、政策適合度の高い提案書（GovPro）を自動生成するクラス・フロー設計。
-
-#### クラス構成と処理フロー
-
-```python
-class DocumentTemplateMapper:
-    """
-    原本テンプレート（Excel/Word）に対して、抽出された構造化データを指定箇所にマッピングする。
-    """
-    def __init__(self, template_path: str):
-        self.template_path = template_path
+1. **6-Gate リファクタリング**: 3-Stage を 6 独立ゲートに分割し `GateResult` dataclass で統一。
+2. **Gate 5 (特定要件動的 RAG)**: `requirement_sentences` 抽出 → NPO実績への正方向ベクトル検索。
+3. **`public.npo_documents` テーブル**: 書類メタデータ管理 + 発行日 3 ヶ月チェック。
+4. **`knowledge_chunks.page_number`**: PDF ページ番号付き確証引用。
+5. **`npo_knowledge_chunks` UNIQUE 制約緩和**: 複数チャンク保存の解禁。
+6. **`public.alerts` 拡張**: `overall_status`, `report_json`, `failed_gate_codes` カラム追加。
 
     def fill_excel_fields(self, data_mappings: dict[str, any], output_path: str):
         """
