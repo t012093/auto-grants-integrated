@@ -308,6 +308,41 @@ DO UPDATE SET title = EXCLUDED.title, message = EXCLUDED.message,
 
 ---
 
+## 5.3 Gate 5: 特定要件 RAG 検索（実装済み）
+
+`Gate5RequirementRAGEvaluator` クラスが `grants.requirement_sentences` の各要件文を `BAAI/bge-m3` でランタイムベクトル化し、`npo_knowledge_chunks` に対して正方向コサイン検索を行う。
+
+### 前提
+- `grants.requirement_sentences` (TEXT[]) にPDF抽出済みの要件文リストが格納されていること
+- `npo_knowledge_chunks` に団体実績ベクトルが格納されていること
+
+### 判定ロジック
+
+| 類似度 | ステータス |
+|---|---|
+| >= 0.70 | PASS |
+| 0.50〜0.70 | WARN |
+| < 0.50 | FAIL |
+
+### フォールバック
+- `requirement_sentences` が空: `SKIP`（スコアに影響なし）
+- `npo_knowledge_chunks` が 0 件: 全要件 `WARN`（「団体実績データ未登録」）
+
+### スコアへの影響
+- Gate 5 `FAIL` → `total_score = 0, status = "FAIL"`（即打切り）
+- Gate 5 `WARN` → `status = "WARNING"`
+- Gate 5 `SKIP` → スコア計算に影響なし
+
+### テンプレート解説生成
+`_generate_explanation()` により確定的にテキストを生成:
+- `explanation`: 要件文・類似度・判定結果を含む説明文
+- `user_advice`: 「団体プロファイルの実績情報にテキストを追記して再判定してください。」
+
+### DB 保存
+`alerts.report_json` (JSONB) に Gate 5 を含む全判定結果を構造化保存。
+
+---
+
 ## 6. エラーハンドリング
 
 ### 6.1 DB 接続障害
@@ -334,20 +369,19 @@ DO UPDATE SET title = EXCLUDED.title, message = EXCLUDED.message,
 
 出力を `overall_status` (ELIGIBLE / CONDITIONAL / INELIGIBLE) に移行。
 
-### 7.2 Gate 5: 特定要件動的 RAG 検索（新規開発）
+### 7.2 Gate 5: 特定要件動的 RAG 検索（✅ 実装済み）
 
-**前提条件** (全て新規実装が必要):
-1. `extract_requirement_sentences()` メソッドの新規実装 (`extract_pdf.py`)
-2. `grants.requirement_sentences` カラムの追加マイグレーション
-3. `knowledge_chunks.page_number` カラムの追加マイグレーション
-4. `npo_knowledge_chunks` UNIQUE 制約の緩和 + `ingest_npo_profile.py` の ON CONFLICT 書き換え
-5. ベクトル検索方向の反転（助成金要件文 → NPO 実績チャンクの正方向検索）
+以下は全て実装済み:
+- ✅ `extract_requirement_sentences()` メソッド (`extract_pdf.py`)
+- ✅ `grants.requirement_sentences` カラム (マイグレーション `20260802_add_gate5_requirement_sentences.sql`)
+- ✅ `Gate5RequirementRAGEvaluator` クラス (`check_eligibility.py`)
+- ✅ `alerts.report_json` カラム（構造化レポート保存）
+- ✅ ベクトル検索方向の反転（助成金要件文 → NPO 実績チャンクの正方向検索）
+- ✅ テンプレートベースで `explanation` と `user_advice` を生成
 
-**設計概要**:
-- `grants.requirement_sentences` の各要求文を `BAAI/bge-m3` でベクトル化。
-- NPO 実績チャンクに対し正方向ベクトル検索を実行。
-- 類似度閾値: `>= 0.70` PASS / `0.50〜0.70` WARN / `< 0.50` FAIL。
-- テンプレートベースで `explanation` と `user_advice` を生成。
+未実装（Phase 2 残件）:
+- `knowledge_chunks.page_number` カラム（ページ番号付き引用）
+- `npo_knowledge_chunks` UNIQUE 制約の緩和（複数チャンク保存）
 
 ### 7.3 書類管理拡張
 

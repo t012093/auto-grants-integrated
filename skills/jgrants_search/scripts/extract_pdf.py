@@ -160,6 +160,51 @@ class PDFExtractor:
 
         return "BRANCH_ALLOWED"
 
+    def extract_requirement_sentences(self, text: str) -> List[str]:
+        """
+        公募要領テキストから応募資格・対象要件の個別要件文を抽出する。
+        - 対象セクション: 「応募資格」「対象要件」「助成対象」「応募条件」
+        - 分割: 箇条書き記号・改行で分割し、要件を示すキーワードを含む文を抽出
+        - フィルタ: 10文字未満除外、重複除外、最大15件
+        """
+        # 対象セクションの検出
+        section_pattern = (
+            r"(?:応募資格|対象要件|助成対象|応募条件|対象となる団体|申請資格)"
+            r"[\s\S]{1,2000}?"
+            r"(?=(?:助成金額|申請方法|提出書類|問合せ先|応募方法|スケジュール|$))"
+        )
+        matches = re.findall(section_pattern, text)
+        target_text = "\n".join(matches) if matches else text[:3000]
+
+        # 箇条書き・改行で分割
+        lines = re.split(
+            r"[\n\r]+|[・〇◆■●]|[\(\（]\d+[\)\）]|①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩|【[^】]+】",
+            target_text
+        )
+
+        sentences: List[str] = []
+        seen: set = set()
+        requirement_keywords = [
+            "こと", "法人", "団体", "有する", "満たす", "対象",
+            "事業", "活動", "実績", "経験", "資格", "届出",
+            "認定", "登録", "設立", "所在",
+        ]
+
+        for line in lines:
+            cleaned = line.strip()
+            # 長さフィルタ
+            if len(cleaned) < 10 or len(cleaned) > 200:
+                continue
+            # 要件キーワードチェック
+            if any(kw in cleaned for kw in requirement_keywords):
+                if cleaned not in seen:
+                    seen.add(cleaned)
+                    sentences.append(cleaned)
+                    if len(sentences) >= 15:
+                        break
+
+        return sentences
+
     def extract_structured_requirements(self, text: str) -> Dict[str, Any]:
         """
         公募要領テキストから 5 大要件を抽出（確定的パース + Substring Guard 構造）
@@ -183,6 +228,8 @@ class PDFExtractor:
         if period_match:
             period_str = period_match.group(0)
 
+        req_sentences = self.extract_requirement_sentences(text)
+
         return {
             "evaluation_criteria": criteria_snippet,
             "funder_intent": intent_snippet,
@@ -190,12 +237,14 @@ class PDFExtractor:
             "expense_rules": expense_rules,
             "required_documents": req_docs,
             "location_requirement_type": loc_req_type,
+            "requirement_sentences": req_sentences,
             "extraction_coverage": {
                 "evaluation_criteria": criteria_snippet is not None,
                 "funder_intent": intent_snippet is not None,
                 "project_period": period_str is not None,
                 "required_documents": len(req_docs) > 0,
                 "expense_rules": len(expense_rules) > 0,
+                "requirement_sentences": len(req_sentences) > 0,
             }
         }
 
@@ -288,11 +337,13 @@ class PDFExtractor:
                     SET detail_text = %s,
                         required_documents = %s,
                         location_requirement_type = %s,
+                        requirement_sentences = %s,
                         is_ocr_processed = true,
                         updated_at = NOW()
                     WHERE id = %s;
                     """,
-                    (updated_detail, reqs["required_documents"], reqs["location_requirement_type"], grant_id)
+                    (updated_detail, reqs["required_documents"], reqs["location_requirement_type"],
+                     reqs.get("requirement_sentences", []), grant_id)
                 )
 
                 # 2. public.grant_expense_rules の更新

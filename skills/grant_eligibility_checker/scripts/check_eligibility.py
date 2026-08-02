@@ -318,11 +318,127 @@ class Stage3SemanticEvaluator:
         }
 
 
+class Gate5RequirementRAGEvaluator:
+    """Gate 5: 特定要件 RAG — 助成金要件文 → NPO実績チャンクへの正方向ベクトル検索"""
+
+    SIMILARITY_PASS = 0.70
+    SIMILARITY_WARN = 0.50
+
+    @classmethod
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any], embedder: Any) -> Dict[str, Any]:
+        requirement_sentences = grant.get("requirement_sentences") or []
+        if not requirement_sentences:
+            return {"status": "SKIP", "reason": "要件文未抽出 (スキップ)", "items": []}
+
+        npo_id = str(npo["id"])
+
+        # Guard: NPO チャンクの存在確認
+        cur.execute("SELECT COUNT(*) AS cnt FROM public.npo_knowledge_chunks WHERE npo_profile_id = %s;", (npo_id,))
+        row = cur.fetchone()
+        count = row["cnt"] if isinstance(row, dict) else row[0]
+        if count == 0:
+            return {
+                "status": "WARN",
+                "reason": "NPO実績ベクトルデータ未登録",
+                "items": [
+                    {
+                        "grant_requirement": req,
+                        "npo_matched_evidence": "実績データなし",
+                        "similarity_score": 0.0,
+                        "status": "WARN",
+                        "explanation": f"要件『{req}』に対する団体実績データが登録されていません。",
+                        "user_advice": "団体プロファイルの実績・活動情報を登録して再判定してください。"
+                    }
+                    for req in requirement_sentences
+                ]
+            }
+
+        items = []
+        has_fail = False
+        has_warn = False
+
+        for req in requirement_sentences:
+            # 要件文を BGE-M3 でベクトル化 (正規化あり)
+            req_vec = embedder.encode([req], normalize_embeddings=True)[0]
+            vec_str = str(req_vec.tolist())
+
+            # NPO 実績チャンクに対して正方向コサイン検索
+            cur.execute(
+                """
+                SELECT content, 1 - (embedding <=> %s::vector) AS similarity
+                FROM public.npo_knowledge_chunks
+                WHERE npo_profile_id = %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT 1;
+                """,
+                (vec_str, npo_id, vec_str)
+            )
+
+            match_row = cur.fetchone()
+            if match_row:
+                sim = float(match_row["similarity"] if isinstance(match_row, dict) else match_row[1])
+                evidence = (match_row["content"] if isinstance(match_row, dict) else match_row[0]) or ""
+            else:
+                sim = 0.0
+                evidence = ""
+
+            if sim >= cls.SIMILARITY_PASS:
+                item_status = "PASS"
+            elif sim >= cls.SIMILARITY_WARN:
+                item_status = "WARN"
+                has_warn = True
+            else:
+                item_status = "FAIL"
+                has_fail = True
+
+            explanation, advice = cls._generate_explanation(req, evidence, sim, item_status)
+
+            items.append({
+                "grant_requirement": req,
+                "npo_matched_evidence": evidence[:100],
+                "similarity_score": round(sim, 4),
+                "status": item_status,
+                "explanation": explanation,
+                "user_advice": advice
+            })
+
+        overall_status = "FAIL" if has_fail else ("WARN" if has_warn else "PASS")
+        return {"status": overall_status, "items": items}
+
+    @staticmethod
+    def _generate_explanation(req: str, evidence: str, sim: float, status: str) -> Tuple[str, str]:
+        if status == "FAIL":
+            explanation = (
+                f"公募要件『{req}』に対する十分な関連実績が"
+                f"団体データ内に確認できませんでした (類似度: {sim:.2f})。"
+            )
+        elif status == "WARN":
+            explanation = (
+                f"公募要件『{req}』に関連する記述が見つかりましたが、"
+                f"十分な適合とは判定できません (類似度: {sim:.2f})。"
+            )
+        else:
+            explanation = f"公募要件『{req}』に適合する実績が確認できました (類似度: {sim:.2f})。"
+
+        advice = "該当する実績がある場合は、団体プロファイルの実績情報にテキストを追記して再判定してください。"
+        return explanation, advice
+
+
 class EligibilityChecker:
-    """Main Orchestrator for 17-Item Eligibility Evaluation"""
+    """Main Orchestrator for Grant Eligibility Evaluation"""
+
+    _embedder = None
 
     def __init__(self, db_url: str):
         self.db_url = db_url
+
+    @classmethod
+    def get_embedder(cls):
+        """BGE-M3 モデルをシングルトンで遅延ロード"""
+        if cls._embedder is None:
+            from sentence_transformers import SentenceTransformer
+            cls._embedder = SentenceTransformer("BAAI/bge-m3")
+        return cls._embedder
 
     def run(self, org_id: str, grant_id: str) -> Dict[str, Any]:
         with psycopg.connect(self.db_url, row_factory=psycopg.rows.dict_row) as conn:
@@ -350,13 +466,17 @@ class EligibilityChecker:
                 stage1 = Stage1RuleEvaluator.evaluate(npo, grant)
                 stage2 = Stage2DocumentMatcher.evaluate(npo, grant)
                 stage3 = Stage3SemanticEvaluator.evaluate(cur, npo, grant)
+                gate5 = Gate5RequirementRAGEvaluator.evaluate(cur, npo, grant, self.get_embedder())
 
-                if not stage1["all_pass"]:
+                if not stage1["all_pass"] or gate5["status"] == "FAIL":
                     total_score = 0
                     status = "FAIL"
                 else:
                     total_score = int(stage2["score"] * 0.4 + stage3["score"] * 0.6)
-                    status = "PASS" if total_score >= 70 else "WARNING"
+                    if gate5["status"] == "WARN":
+                        status = "WARNING"
+                    else:
+                        status = "PASS" if total_score >= 70 else "WARNING"
 
                 # Align keys with spec.md output schema
                 report = {
@@ -369,6 +489,7 @@ class EligibilityChecker:
                     "stage1_results": stage1,
                     "stage2_results": stage2,
                     "stage3_results": stage3,
+                    "gate5_results": gate5,
                     "evaluated_at": datetime.now().isoformat()
                 }
 
@@ -378,26 +499,26 @@ class EligibilityChecker:
 
     def _upsert_alert(self, org_id: str, grant_id: int, title: str, score: int, report: Dict[str, Any]):
         msg = f"要件適合スコア: {score}% | 未準備書類: {len(report['stage2_results']['missing'])}件"
+        report_json = json.dumps(report, ensure_ascii=False, default=str)
         try:
             with psycopg.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
-                    # True Upsert using PostgreSQL ON CONFLICT
                     cur.execute(
                         """
-                        INSERT INTO public.alerts (npo_profile_id, grant_id, alert_type, title, message, match_score, is_read)
-                        VALUES (%s, %s, %s, %s, %s, %s, false)
+                        INSERT INTO public.alerts
+                            (npo_profile_id, grant_id, alert_type, title, message, match_score, is_read, report_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, false, %s::jsonb)
                         ON CONFLICT ON CONSTRAINT uq_alerts_npo_grant_type
                         DO UPDATE SET
                             title = EXCLUDED.title,
                             message = EXCLUDED.message,
                             match_score = EXCLUDED.match_score,
+                            report_json = EXCLUDED.report_json,
                             is_read = false,
                             created_at = NOW();
                         """,
-                        (org_id, grant_id, "ELIGIBILITY_MATCH", f"【適合率 {score}%】{title}", msg, score)
+                        (org_id, grant_id, "ELIGIBILITY_MATCH", f"【適合率 {score}%】{title}", msg, score, report_json)
                     )
-
-
                 conn.commit()
         except Exception as e:
             logging.warning(f"Could not save alert to DB: {e}")
@@ -439,6 +560,14 @@ def main():
             print("\n【Stage 3: セマンティック適合度 (8項目)】", f"{result['stage3_results']['score']}%")
             for k, v in result['stage3_results']['criteria_scores'].items():
                 print(f"  - {k}: {v}点")
+
+            gate5 = result.get('gate5_results', {})
+            if gate5.get('status') != 'SKIP':
+                print(f"\n【Gate 5: 特定要件 RAG】 {gate5.get('status', 'N/A')}")
+                for item in gate5.get('items', []):
+                    icon = "✅" if item['status'] == 'PASS' else ("⚠️" if item['status'] == 'WARN' else "❌")
+                    print(f"  {icon} {item['grant_requirement'][:50]} → {item['similarity_score']:.2f}")
+
             print("==================================================\n")
     except Exception as e:
         print(f"❌ Evaluation Error: {e}", file=sys.stderr)

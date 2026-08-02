@@ -137,3 +137,65 @@ def test_stage1_location_kyoto_match():
     res = Stage1RuleEvaluator.evaluate(npo, grant)
     assert res["details"]["target_area"]["pass"] is True
 
+
+# --- Gate 5: extract_requirement_sentences テスト ---
+
+def test_extract_requirement_sentences_basic():
+    """基本的な要件文抽出"""
+    extractor = PDFExtractor(db_url=None)
+    text = """
+    応募資格
+    以下の要件を全て満たす団体が対象となります。
+    ・特定非営利活動法人として認定を受けていること
+    ・設立から3年以上の活動実績を有する団体であること
+    ・東京都内に主たる事務所が所在すること
+    申請方法
+    所定の申請書に必要事項を記入してください。
+    """
+    sentences = extractor.extract_requirement_sentences(text)
+    assert len(sentences) >= 2
+    assert any("認定" in s or "法人" in s for s in sentences)
+    assert any("実績" in s or "活動" in s for s in sentences)
+
+def test_extract_requirement_sentences_max_15():
+    """最大15件制限の検証"""
+    extractor = PDFExtractor(db_url=None)
+    lines = "\n".join([f"・要件{i}: 特定非営利活動法人として認定を受けた団体であること" for i in range(20)])
+    text = f"応募資格\n{lines}\n申請方法"
+    sentences = extractor.extract_requirement_sentences(text)
+    assert len(sentences) <= 15
+
+def test_extract_requirement_sentences_short_filter():
+    """10文字未満の短文が除外されること"""
+    extractor = PDFExtractor(db_url=None)
+    text = """
+    応募資格
+    ・対象
+    ・NPO法人として認定を受けた実績のある団体であること
+    申請方法
+    """
+    sentences = extractor.extract_requirement_sentences(text)
+    assert all(len(s) >= 10 for s in sentences)
+
+
+# --- Gate 5: Gate5RequirementRAGEvaluator テスト ---
+from skills.grant_eligibility_checker.scripts.check_eligibility import Gate5RequirementRAGEvaluator
+
+def test_gate5_skip_when_no_sentences():
+    """requirement_sentences が空なら SKIP を返す"""
+    grant = {"requirement_sentences": []}
+    npo = {"id": "test-npo-id"}
+    result = Gate5RequirementRAGEvaluator.evaluate(None, npo, grant, None)
+    assert result["status"] == "SKIP"
+    assert result["items"] == []
+
+def test_gate5_explanation_template():
+    """テンプレート解説の構造検証"""
+    explanation, advice = Gate5RequirementRAGEvaluator._generate_explanation(
+        "NPO法人であること", "活動分野: 子ども支援", 0.45, "FAIL"
+    )
+    assert "NPO法人であること" in explanation
+    assert "0.45" in explanation
+    assert "再判定" in advice
+
+
