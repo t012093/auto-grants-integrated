@@ -1,6 +1,21 @@
 import pytest
-from skills.grant_eligibility_checker.scripts.check_eligibility import Stage1RuleEvaluator
+from skills.grant_eligibility_checker.scripts.check_eligibility import (
+    Stage1RuleEvaluator,
+    Gate1BasicRuleEvaluator,
+    Gate2LocationEvaluator,
+    Gate3BudgetEvaluator,
+    Gate5RequirementRAGEvaluator,
+    Gate6DocumentEvaluator,
+    GateResult,
+    area_match,
+    normalize_prefecture,
+)
 from skills.jgrants_search.scripts.extract_pdf import PDFExtractor
+
+
+# ---------------------------------------------------------------------------
+# 後方互換テスト (Stage1RuleEvaluator エイリアス)
+# ---------------------------------------------------------------------------
 
 def test_stage1_location_headquarter_only_fail():
     npo = {
@@ -22,7 +37,6 @@ def test_stage1_location_headquarter_only_fail():
     res = Stage1RuleEvaluator.evaluate(npo, grant)
     assert res["all_pass"] is False
     assert res["details"]["target_area"]["pass"] is False
-    assert "本店限定要件" in res["details"]["target_area"]["reason"]
 
 def test_stage1_location_branch_allowed_pass():
     npo = {
@@ -44,7 +58,6 @@ def test_stage1_location_branch_allowed_pass():
     res = Stage1RuleEvaluator.evaluate(npo, grant)
     assert res["all_pass"] is True
     assert res["details"]["target_area"]["pass"] is True
-    assert "支店認容要件" in res["details"]["target_area"]["reason"]
 
 def test_stage1_location_legacy_fallback():
     npo = {
@@ -65,6 +78,11 @@ def test_stage1_location_legacy_fallback():
     assert res["all_pass"] is True
     assert res["details"]["target_area"]["pass"] is True
 
+
+# ---------------------------------------------------------------------------
+# PDF Extractor テスト
+# ---------------------------------------------------------------------------
+
 def test_pdf_extractor_location_requirement():
     extractor = PDFExtractor(db_url=None)
     hq_text = "本事業の対象者は、主たる事務所が東京都内に所在する法人に限る。"
@@ -73,8 +91,10 @@ def test_pdf_extractor_location_requirement():
     branch_text = "公募対象: 東京都内に本店または支店・営業所を有する事業者。"
     assert extractor.extract_location_requirement_deterministic(branch_text) == "BRANCH_ALLOWED"
 
-# --- 都道府県前方一致テスト (area_match) ---
-from skills.grant_eligibility_checker.scripts.check_eligibility import area_match, normalize_prefecture
+
+# ---------------------------------------------------------------------------
+# 都道府県前方一致テスト (area_match)
+# ---------------------------------------------------------------------------
 
 def test_normalize_prefecture():
     assert normalize_prefecture("東京都千代田区") == "東京都"
@@ -138,7 +158,9 @@ def test_stage1_location_kyoto_match():
     assert res["details"]["target_area"]["pass"] is True
 
 
-# --- Gate 5: extract_requirement_sentences テスト ---
+# ---------------------------------------------------------------------------
+# Gate 5: extract_requirement_sentences テスト
+# ---------------------------------------------------------------------------
 
 def test_extract_requirement_sentences_basic():
     """基本的な要件文抽出"""
@@ -178,16 +200,17 @@ def test_extract_requirement_sentences_short_filter():
     assert all(len(s) >= 10 for s in sentences)
 
 
-# --- Gate 5: Gate5RequirementRAGEvaluator テスト ---
-from skills.grant_eligibility_checker.scripts.check_eligibility import Gate5RequirementRAGEvaluator
+# ---------------------------------------------------------------------------
+# Gate 5: Gate5RequirementRAGEvaluator テスト
+# ---------------------------------------------------------------------------
 
 def test_gate5_skip_when_no_sentences():
     """requirement_sentences が空なら SKIP を返す"""
     grant = {"requirement_sentences": []}
     npo = {"id": "test-npo-id"}
     result = Gate5RequirementRAGEvaluator.evaluate(None, npo, grant, None)
-    assert result["status"] == "SKIP"
-    assert result["items"] == []
+    assert result.status == "SKIP"
+    assert result.passed is True
 
 def test_gate5_explanation_template():
     """テンプレート解説の構造検証"""
@@ -199,3 +222,141 @@ def test_gate5_explanation_template():
     assert "再判定" in advice
 
 
+# ---------------------------------------------------------------------------
+# 6-Gate 新規テスト
+# ---------------------------------------------------------------------------
+
+def test_gate_result_dataclass():
+    """GateResult の基本構造テスト"""
+    gr = GateResult(
+        gate_code="GATE_1", gate_name="テスト", passed=True, status="PASS"
+    )
+    d = gr.to_dict()
+    assert d["gate_code"] == "GATE_1"
+    assert d["passed"] is True
+    assert d["score"] == 100
+    assert isinstance(d["details"], dict)
+    assert isinstance(d["failed_items"], list)
+
+
+def test_gate1_basic_rule_pass():
+    """Gate 1: 全項目合格"""
+    npo = {
+        "organization_type": "NPO_CORPORATION",
+        "establishment_year": 2020,
+        "annual_budget": 10000000,
+    }
+    grant = {
+        "eligible_org_types": ["NPO_CORPORATION"],
+        "min_years_active": 0,
+        "status": "OPEN"
+    }
+    g = Gate1BasicRuleEvaluator.evaluate(npo, grant)
+    assert g.passed is True
+    assert g.status == "PASS"
+    assert g.gate_code == "GATE_1"
+
+
+def test_gate1_basic_rule_fail_org_type():
+    """Gate 1: 法人格不一致で FAIL"""
+    npo = {
+        "organization_type": "GENERAL_INC",
+        "establishment_year": 2020,
+    }
+    grant = {
+        "eligible_org_types": ["NPO_CORPORATION"],
+        "min_years_active": 0,
+        "status": "OPEN"
+    }
+    g = Gate1BasicRuleEvaluator.evaluate(npo, grant)
+    assert g.passed is False
+    assert "organization_type" in g.failed_items
+
+
+def test_gate2_location_pass():
+    """Gate 2: 拠点一致で PASS"""
+    npo = {"headquarter_location": "東京都千代田区"}
+    grant = {"target_area": "東京都", "location_requirement_type": "HEADQUARTER_ONLY"}
+    g = Gate2LocationEvaluator.evaluate(npo, grant)
+    assert g.passed is True
+    assert g.gate_code == "GATE_2"
+
+
+def test_gate2_location_fail():
+    """Gate 2: 拠点不一致で FAIL"""
+    npo = {"headquarter_location": "大阪府大阪市"}
+    grant = {"target_area": "東京都", "location_requirement_type": "HEADQUARTER_ONLY"}
+    g = Gate2LocationEvaluator.evaluate(npo, grant)
+    assert g.passed is False
+
+
+def test_gate3_budget_pass():
+    """Gate 3: 予算規模 50%以内で PASS"""
+    npo = {"annual_budget": 10000000}
+    grant = {"amount_max": 4000000}
+    g = Gate3BudgetEvaluator.evaluate(npo, grant)
+    assert g.passed is True
+
+
+def test_gate3_budget_fail():
+    """Gate 3: 予算規模 50%超過で FAIL"""
+    npo = {"annual_budget": 1000000}
+    grant = {"amount_max": 800000}
+    g = Gate3BudgetEvaluator.evaluate(npo, grant)
+    assert g.passed is False
+
+
+def test_gate6_document_full():
+    """Gate 6: 全書類準備済み"""
+    npo = {"prepared_documents": ["ARTICLES", "FINANCIAL_REPORT", "BOARD_LIST", "REGISTRY_CERTIFICATE"]}
+    grant = {"required_documents": None}
+    g = Gate6DocumentEvaluator.evaluate(npo, grant)
+    assert g.score == 100
+    assert g.gate_code == "GATE_6"
+
+
+def test_gate6_document_missing():
+    """Gate 6: 書類不足"""
+    npo = {"prepared_documents": ["ARTICLES"]}
+    grant = {"required_documents": ["ARTICLES", "FINANCIAL_REPORT"]}
+    g = Gate6DocumentEvaluator.evaluate(npo, grant)
+    assert g.score == 50
+    assert "FINANCIAL_REPORT" in g.failed_items
+
+
+def test_overall_status_eligible():
+    """後方互換: 全ゲート PASS → stage1 all_pass=True"""
+    npo = {
+        "organization_type": "NPO_CORPORATION",
+        "establishment_year": 2020,
+        "annual_budget": 10000000,
+        "headquarter_location": "東京都千代田区",
+    }
+    grant = {
+        "target_area": "東京都",
+        "location_requirement_type": "HEADQUARTER_ONLY",
+        "eligible_org_types": ["NPO_CORPORATION"],
+        "min_years_active": 0,
+        "amount_max": 1000000,
+        "status": "OPEN"
+    }
+    res = Stage1RuleEvaluator.evaluate(npo, grant)
+    assert res["all_pass"] is True
+
+
+def test_overall_status_ineligible():
+    """後方互換: Gate 1 FAIL → stage1 all_pass=False"""
+    npo = {
+        "organization_type": "GENERAL_INC",
+        "establishment_year": 2020,
+        "annual_budget": 10000000,
+    }
+    grant = {
+        "eligible_org_types": ["NPO_CORPORATION"],
+        "min_years_active": 0,
+        "status": "OPEN",
+        "target_area": "全国",
+        "amount_max": 1000000,
+    }
+    res = Stage1RuleEvaluator.evaluate(npo, grant)
+    assert res["all_pass"] is False

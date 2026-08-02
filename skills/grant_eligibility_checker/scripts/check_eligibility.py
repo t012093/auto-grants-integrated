@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-17-Item 3-Tier Hybrid Eligibility Checker
-Scans npo_profiles & grants data from Neon DB, performs full 17-item eligibility evaluation,
+6-Gate Grant Eligibility Checker
+Scans npo_profiles & grants data from Neon DB, performs full 6-gate eligibility evaluation,
 and saves/updates the result in public.alerts using PostgreSQL ON CONFLICT.
 """
 
@@ -10,6 +10,7 @@ import sys
 import json
 import logging
 import argparse
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -53,25 +54,47 @@ def area_match(grant_area: str, location: str) -> bool:
     return normalize_prefecture(grant_area) == normalize_prefecture(location)
 
 
+# ---------------------------------------------------------------------------
+# GateResult dataclass — 全ゲートの統一出力構造
+# ---------------------------------------------------------------------------
 
-class Stage1RuleEvaluator:
-    """Stage 1: Rule-based Deterministic Evaluation (0% Hallucination - 5 Items)"""
+@dataclass
+class GateResult:
+    gate_code: str           # "GATE_1" 〜 "GATE_6"
+    gate_name: str           # 日本語名
+    passed: bool             # True / False
+    status: str              # "PASS" / "WARN" / "FAIL" / "SKIP"
+    score: int = 100         # 0-100
+    details: Dict[str, Any] = field(default_factory=dict)
+    failed_items: List[str] = field(default_factory=list)
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# Gate 1: 基本ルール判定 (法人格 / 実績年数 / 公募ステータス)
+# ---------------------------------------------------------------------------
+
+class Gate1BasicRuleEvaluator:
+    """Gate 1: 法人格一致・実績年数・公募ステータスの確定ルール判定"""
 
     @staticmethod
-    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
-        results = {}
-        all_pass = True
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult:
+        details = {}
+        failed_items = []
 
         # 1. 法人格一致 (organization_type)
         eligible_types = grant.get("eligible_org_types") or ["NPO_CORPORATION", "GENERAL_INC", "UNINCORPORATED"]
         npo_type = npo.get("organization_type") or "NPO_CORPORATION"
         type_pass = npo_type in eligible_types
-        results["organization_type"] = {
+        details["organization_type"] = {
             "pass": type_pass,
             "reason": f"団体型 '{npo_type}' は対象枠 {eligible_types} に{'含まれます' if type_pass else '含まれません'}"
         }
         if not type_pass:
-            all_pass = False
+            failed_items.append("organization_type")
 
         # 2. 実績年数 (years_active)
         min_years = grant.get("min_years_active") or 0
@@ -79,14 +102,58 @@ class Stage1RuleEvaluator:
         current_year = datetime.now().year
         active_years = (current_year - est_year) if est_year else 0
         years_pass = active_years >= min_years
-        results["years_active"] = {
+        details["years_active"] = {
             "pass": years_pass,
             "reason": f"活動実績 {active_years}年 (必要年数: {min_years}年)"
         }
         if not years_pass:
-            all_pass = False
+            failed_items.append("years_active")
 
-        # 3. 対象地域 (target_area)
+        # 3. 公募ステータス (grant_status)
+        status = grant.get("status") or "OPEN"
+        deadline = grant.get("deadline")
+        is_open = status == "OPEN"
+        deadline_valid = True
+        if deadline:
+            if isinstance(deadline, str):
+                try:
+                    deadline = datetime.strptime(deadline[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    deadline_valid = True
+            elif isinstance(deadline, datetime):
+                deadline = deadline.date()
+            if isinstance(deadline, date):
+                deadline_valid = deadline >= date.today()
+        status_pass = is_open and deadline_valid
+        details["grant_status"] = {
+            "pass": status_pass,
+            "reason": f"ステータス '{status}' / 締切 '{deadline or '未設定'}'"
+        }
+        if not status_pass:
+            failed_items.append("grant_status")
+
+        all_pass = len(failed_items) == 0
+        return GateResult(
+            gate_code="GATE_1",
+            gate_name="基本ルール判定",
+            passed=all_pass,
+            status="PASS" if all_pass else "FAIL",
+            score=100 if all_pass else 0,
+            details=details,
+            failed_items=failed_items,
+            reason="基本要件をすべて満たしています" if all_pass else f"不合格項目: {', '.join(failed_items)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Gate 2: 拠点要件 (都道府県前方一致マッチング)
+# ---------------------------------------------------------------------------
+
+class Gate2LocationEvaluator:
+    """Gate 2: 対象地域の拠点・活動地域適合判定"""
+
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult:
         grant_area = grant.get("target_area") or "全国"
         req_type = grant.get("location_requirement_type") or "BRANCH_ALLOWED"
 
@@ -113,84 +180,56 @@ class Stage1RuleEvaluator:
             area_pass = any(area_match(grant_area, c) for c in check_list)
             reason = f"公募エリア '{grant_area}' (支店認容要件) vs 本店・支店拠点 {check_list}"
 
-        results["target_area"] = {
-            "pass": area_pass,
-            "reason": reason
-        }
-        if not area_pass:
-            all_pass = False
+        return GateResult(
+            gate_code="GATE_2",
+            gate_name="拠点要件",
+            passed=area_pass,
+            status="PASS" if area_pass else "FAIL",
+            score=100 if area_pass else 0,
+            details={"target_area": {"pass": area_pass, "reason": reason}},
+            failed_items=[] if area_pass else ["target_area"],
+            reason=reason
+        )
 
-        # 4. 予算規模整合 (budget_ratio) - spec.md: 助成上限が年予算の50%以内が適正
+
+# ---------------------------------------------------------------------------
+# Gate 3: 予算規模 (助成上限 <= 年予算 50%)
+# ---------------------------------------------------------------------------
+
+class Gate3BudgetEvaluator:
+    """Gate 3: 予算規模の整合性判定"""
+
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult:
         max_amount = grant.get("amount_max") or 0
         annual_budget = npo.get("annual_budget") or 0
+
         if max_amount > 0 and annual_budget > 0:
             budget_ratio = max_amount / annual_budget
-            budget_pass = budget_ratio <= 0.50  # spec: <= 50%
+            budget_pass = budget_ratio <= 0.50
             reason = f"助成上限 {max_amount:,}円 / 前年予算 {annual_budget:,}円 (比率: {budget_ratio*100:.1f}% <= 50%上限)"
         else:
             budget_pass = True
             reason = "予算要件制限なし"
-        results["budget_ratio"] = {
-            "pass": budget_pass,
-            "reason": reason
-        }
-        if not budget_pass:
-            all_pass = False
 
-        # 5. 公募ステータス (grant_status)
-        status = grant.get("status") or "OPEN"
-        deadline = grant.get("deadline")
-        is_open = status == "OPEN"
-        deadline_valid = True
-        if deadline:
-            if isinstance(deadline, str):
-                try:
-                    deadline = datetime.strptime(deadline[:10], "%Y-%m-%d").date()
-                except ValueError:
-                    deadline_valid = True
-            elif isinstance(deadline, datetime):
-                deadline = deadline.date()
-            if isinstance(deadline, date):
-                deadline_valid = deadline >= date.today()
-        status_pass = is_open and deadline_valid
-        results["grant_status"] = {
-            "pass": status_pass,
-            "reason": f"ステータス '{status}' / 締切 '{deadline or '未設定'}'"
-        }
-        if not status_pass:
-            all_pass = False
-
-        return {"all_pass": all_pass, "details": results}
+        return GateResult(
+            gate_code="GATE_3",
+            gate_name="予算規模",
+            passed=budget_pass,
+            status="PASS" if budget_pass else "FAIL",
+            score=100 if budget_pass else 0,
+            details={"budget_ratio": {"pass": budget_pass, "reason": reason}},
+            failed_items=[] if budget_pass else ["budget_ratio"],
+            reason=reason
+        )
 
 
-class Stage2DocumentMatcher:
-    """Stage 2: Document Readiness Comparison (4 Items)"""
+# ---------------------------------------------------------------------------
+# Gate 4: セマンティック適合度 (8軸 pgvector + キーワード)
+# ---------------------------------------------------------------------------
 
-    @staticmethod
-    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
-        raw_required = grant.get("required_documents")
-        required_docs = set(raw_required) if raw_required is not None else set()
-        prepared_docs = set(npo.get("prepared_documents") or [])
-
-        # If required_documents is explicit empty list, no documents are required
-        if raw_required is None:
-            required_docs = {"ARTICLES", "FINANCIAL_REPORT", "BOARD_LIST", "REGISTRY_CERTIFICATE"}
-
-        missing_docs = list(required_docs - prepared_docs)
-        prepared_matched = list(required_docs & prepared_docs)
-
-        score = int((len(prepared_matched) / len(required_docs)) * 100) if required_docs else 100
-
-        return {
-            "score": score,
-            "required": sorted(list(required_docs)),
-            "prepared": sorted(prepared_matched),
-            "missing": sorted(missing_docs)
-        }
-
-
-class Stage3SemanticEvaluator:
-    """Stage 3: 8-Item Semantic Alignment (pgvector Cosine Similarity) & Qualitative Rules"""
+class Gate4SemanticEvaluator:
+    """Gate 4: 8-Item Semantic Alignment (pgvector Cosine Similarity) & Qualitative Rules"""
 
     # pgvector クエリ失敗時・データ未投入時のフォールバックスコア
     FALLBACK_SCORE = 75
@@ -226,10 +265,10 @@ class Stage3SemanticEvaluator:
                 return score, row.get("content")
         except Exception as e:
             logging.warning(f"pgvector query fallback for {chunk_type}: {e}")
-        return Stage3SemanticEvaluator.FALLBACK_SCORE, None
+        return Gate4SemanticEvaluator.FALLBACK_SCORE, None
 
     @classmethod
-    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult:
         detail_text = grant.get("detail_text") or ""
         title = grant.get("title") or ""
         full_grant_text = f"{title} {detail_text}"
@@ -243,7 +282,6 @@ class Stage3SemanticEvaluator:
         # 10. 活動分野適合度 (pgvector Cosine Similarity: ACTIVITY_TAGS)
         act_score, act_quote = cls._get_vector_similarity(cur, org_id, grant_id, "ACTIVITY_TAGS")
         if act_quote is None:
-            # Rule fallback
             tags = npo.get("activity_tags") or []
             tag_hits = sum(1 for tag in tags if tag in full_grant_text)
             act_score = min(70 + tag_hits * 15, 100)
@@ -254,7 +292,6 @@ class Stage3SemanticEvaluator:
         # 11. ターゲット層適合度 (pgvector Cosine Similarity: TARGET_AUDIENCE)
         aud_score, aud_quote = cls._get_vector_similarity(cur, org_id, grant_id, "TARGET_AUDIENCE")
         if aud_quote is None:
-            # Rule fallback
             audiences = npo.get("target_audience") or []
             aud_hits = sum(1 for aud in audiences if aud in full_grant_text)
             aud_score = min(75 + aud_hits * 15, 100)
@@ -266,7 +303,6 @@ class Stage3SemanticEvaluator:
         # 12. 事業目的適合度 (pgvector Cosine Similarity: DESCRIPTION)
         desc_score, desc_quote = cls._get_vector_similarity(cur, org_id, grant_id, "DESCRIPTION")
         if desc_quote is None:
-            # Rule fallback
             desc = npo.get("description") or ""
             desc_score = 85 if len(desc) > 20 else 70
         else:
@@ -296,8 +332,6 @@ class Stage3SemanticEvaluator:
         scores["compliance"] = 100
 
         # Substring Match Guard Check
-        # pgvector 由来の quote は detail_text の部分文字列とは限らないため、
-        # 完全一致ではなく 20 文字以上の重複部分があれば evidence として採用する。
         valid_quotes = []
         for q in evidence_quotes:
             if q in detail_text or q in title:
@@ -311,12 +345,22 @@ class Stage3SemanticEvaluator:
 
         avg_score = int(sum(scores.values()) / len(scores)) if scores else 80
 
-        return {
-            "score": avg_score,
-            "criteria_scores": scores,
-            "evidence_quotes": valid_quotes
-        }
+        return GateResult(
+            gate_code="GATE_4",
+            gate_name="セマンティック適合度",
+            passed=True,  # Gate 4 は常に pass (スコア貢献)
+            status="PASS",
+            score=avg_score,
+            details={
+                "criteria_scores": scores,
+                "evidence_quotes": valid_quotes
+            }
+        )
 
+
+# ---------------------------------------------------------------------------
+# Gate 5: 特定要件 RAG (正方向ベクトル検索)
+# ---------------------------------------------------------------------------
 
 class Gate5RequirementRAGEvaluator:
     """Gate 5: 特定要件 RAG — 助成金要件文 → NPO実績チャンクへの正方向ベクトル検索"""
@@ -325,10 +369,17 @@ class Gate5RequirementRAGEvaluator:
     SIMILARITY_WARN = 0.50
 
     @classmethod
-    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any], embedder: Any) -> Dict[str, Any]:
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any], embedder: Any) -> GateResult:
         requirement_sentences = grant.get("requirement_sentences") or []
         if not requirement_sentences:
-            return {"status": "SKIP", "reason": "要件文未抽出 (スキップ)", "items": []}
+            return GateResult(
+                gate_code="GATE_5",
+                gate_name="特定要件 RAG",
+                passed=True,
+                status="SKIP",
+                score=100,
+                reason="要件文未抽出 (スキップ)"
+            )
 
         npo_id = str(npo["id"])
 
@@ -337,10 +388,14 @@ class Gate5RequirementRAGEvaluator:
         row = cur.fetchone()
         count = row["cnt"] if isinstance(row, dict) else row[0]
         if count == 0:
-            return {
-                "status": "WARN",
-                "reason": "NPO実績ベクトルデータ未登録",
-                "items": [
+            return GateResult(
+                gate_code="GATE_5",
+                gate_name="特定要件 RAG",
+                passed=True,  # WARN は打切りではない
+                status="WARN",
+                score=50,
+                reason="NPO実績ベクトルデータ未登録",
+                details={"items": [
                     {
                         "grant_requirement": req,
                         "npo_matched_evidence": "実績データなし",
@@ -350,8 +405,8 @@ class Gate5RequirementRAGEvaluator:
                         "user_advice": "団体プロファイルの実績・活動情報を登録して再判定してください。"
                     }
                     for req in requirement_sentences
-                ]
-            }
+                ]}
+            )
 
         items = []
         has_fail = False
@@ -402,8 +457,23 @@ class Gate5RequirementRAGEvaluator:
                 "user_advice": advice
             })
 
-        overall_status = "FAIL" if has_fail else ("WARN" if has_warn else "PASS")
-        return {"status": overall_status, "items": items}
+        if has_fail:
+            overall_status = "FAIL"
+        elif has_warn:
+            overall_status = "WARN"
+        else:
+            overall_status = "PASS"
+
+        return GateResult(
+            gate_code="GATE_5",
+            gate_name="特定要件 RAG",
+            passed=(overall_status != "FAIL"),
+            status=overall_status,
+            score=0 if has_fail else (50 if has_warn else 100),
+            details={"items": items},
+            failed_items=[it["grant_requirement"][:30] for it in items if it["status"] == "FAIL"],
+            reason=f"要件適合判定: {overall_status}"
+        )
 
     @staticmethod
     def _generate_explanation(req: str, evidence: str, sim: float, status: str) -> Tuple[str, str]:
@@ -424,8 +494,105 @@ class Gate5RequirementRAGEvaluator:
         return explanation, advice
 
 
+# ---------------------------------------------------------------------------
+# Gate 6: 書類準備率
+# ---------------------------------------------------------------------------
+
+class Gate6DocumentEvaluator:
+    """Gate 6: 提出書類の準備状況チェック"""
+
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult:
+        raw_required = grant.get("required_documents")
+        required_docs = set(raw_required) if raw_required is not None else set()
+        prepared_docs = set(npo.get("prepared_documents") or [])
+
+        # If required_documents is explicit empty list, no documents are required
+        if raw_required is None:
+            required_docs = {"ARTICLES", "FINANCIAL_REPORT", "BOARD_LIST", "REGISTRY_CERTIFICATE"}
+
+        missing_docs = list(required_docs - prepared_docs)
+        prepared_matched = list(required_docs & prepared_docs)
+
+        score = int((len(prepared_matched) / len(required_docs)) * 100) if required_docs else 100
+
+        return GateResult(
+            gate_code="GATE_6",
+            gate_name="書類準備率",
+            passed=True,  # Gate 6 は常に pass (スコア貢献)
+            status="PASS" if score == 100 else ("WARN" if score >= 50 else "FAIL"),
+            score=score,
+            details={
+                "required": sorted(list(required_docs)),
+                "prepared": sorted(prepared_matched),
+                "missing": sorted(missing_docs)
+            },
+            failed_items=sorted(missing_docs),
+            reason=f"書類準備率 {score}% ({len(prepared_matched)}/{len(required_docs)})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 後方互換エイリアス (既存テスト・外部参照用)
+# ---------------------------------------------------------------------------
+
+class Stage1RuleEvaluator:
+    """後方互換: Gate 1/2/3 を統合して旧 Stage 1 インターフェースを提供"""
+
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
+        g1 = Gate1BasicRuleEvaluator.evaluate(npo, grant)
+        g2 = Gate2LocationEvaluator.evaluate(npo, grant)
+        g3 = Gate3BudgetEvaluator.evaluate(npo, grant)
+
+        all_pass = g1.passed and g2.passed and g3.passed
+        details = {}
+        details.update(g1.details)
+        details.update(g2.details)
+        details.update(g3.details)
+
+        return {"all_pass": all_pass, "details": details}
+
+
+class Stage2DocumentMatcher:
+    """後方互換: Gate 6 を旧 Stage 2 インターフェースで提供"""
+
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
+        g6 = Gate6DocumentEvaluator.evaluate(npo, grant)
+        return {
+            "score": g6.score,
+            "required": g6.details.get("required", []),
+            "prepared": g6.details.get("prepared", []),
+            "missing": g6.details.get("missing", [])
+        }
+
+
+class Stage3SemanticEvaluator:
+    """後方互換: Gate 4 を旧 Stage 3 インターフェースで提供"""
+
+    FALLBACK_SCORE = Gate4SemanticEvaluator.FALLBACK_SCORE
+
+    @staticmethod
+    def _get_vector_similarity(cur: Any, npo_id: str, grant_id: int, chunk_type: str) -> Tuple[int, Optional[str]]:
+        return Gate4SemanticEvaluator._get_vector_similarity(cur, npo_id, grant_id, chunk_type)
+
+    @classmethod
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any]) -> Dict[str, Any]:
+        g4 = Gate4SemanticEvaluator.evaluate(cur, npo, grant)
+        return {
+            "score": g4.score,
+            "criteria_scores": g4.details.get("criteria_scores", {}),
+            "evidence_quotes": g4.details.get("evidence_quotes", [])
+        }
+
+
+# ---------------------------------------------------------------------------
+# EligibilityChecker: 6-Gate オーケストレータ
+# ---------------------------------------------------------------------------
+
 class EligibilityChecker:
-    """Main Orchestrator for Grant Eligibility Evaluation"""
+    """Main Orchestrator for 6-Gate Grant Eligibility Evaluation"""
 
     _embedder = None
 
@@ -463,42 +630,106 @@ class EligibilityChecker:
                 if not grant:
                     raise ValueError(f"Grant with ID '{grant_id}' not found.")
 
-                stage1 = Stage1RuleEvaluator.evaluate(npo, grant)
-                stage2 = Stage2DocumentMatcher.evaluate(npo, grant)
-                stage3 = Stage3SemanticEvaluator.evaluate(cur, npo, grant)
-                gate5 = Gate5RequirementRAGEvaluator.evaluate(cur, npo, grant, self.get_embedder())
+                gates: List[GateResult] = []
 
-                if not stage1["all_pass"] or gate5["status"] == "FAIL":
-                    total_score = 0
-                    status = "FAIL"
+                # Gate 1: 基本ルール (早期打切り)
+                g1 = Gate1BasicRuleEvaluator.evaluate(npo, grant)
+                gates.append(g1)
+
+                # Gate 2: 拠点要件 (早期打切り)
+                g2 = Gate2LocationEvaluator.evaluate(npo, grant)
+                gates.append(g2)
+
+                # Gate 3: 予算規模 (早期打切り)
+                g3 = Gate3BudgetEvaluator.evaluate(npo, grant)
+                gates.append(g3)
+
+                # 早期打切り判定
+                early_fail = not all(g.passed for g in [g1, g2, g3])
+                if early_fail:
+                    failed_codes = [g.gate_code for g in gates if not g.passed]
+                    return self._build_report(npo, grant, gates, "INELIGIBLE", 0, failed_codes)
+
+                # Gate 4: セマンティック適合度
+                g4 = Gate4SemanticEvaluator.evaluate(cur, npo, grant)
+                gates.append(g4)
+
+                # Gate 5: 特定要件 RAG
+                g5 = Gate5RequirementRAGEvaluator.evaluate(cur, npo, grant, self.get_embedder())
+                gates.append(g5)
+
+                if g5.status == "FAIL":
+                    failed_codes = [g5.gate_code]
+                    return self._build_report(npo, grant, gates, "INELIGIBLE", 0, failed_codes)
+
+                # Gate 6: 書類準備率
+                g6 = Gate6DocumentEvaluator.evaluate(npo, grant)
+                gates.append(g6)
+
+                # スコア計算 & overall_status 判定
+                total_score = int(g6.score * 0.4 + g4.score * 0.6)
+                has_warn = any(g.status == "WARN" for g in gates)
+
+                if total_score >= 70 and not has_warn:
+                    overall_status = "ELIGIBLE"
+                elif total_score >= 50 or has_warn:
+                    overall_status = "CONDITIONAL"
                 else:
-                    total_score = int(stage2["score"] * 0.4 + stage3["score"] * 0.6)
-                    if gate5["status"] == "WARN":
-                        status = "WARNING"
-                    else:
-                        status = "PASS" if total_score >= 70 else "WARNING"
+                    overall_status = "INELIGIBLE"
 
-                # Align keys with spec.md output schema
-                report = {
-                    "grant_id": grant["id"],
-                    "grant_title": grant["title"],
-                    "npo_profile_id": str(npo["id"]),
-                    "npo_name": npo["name"],
-                    "match_score": total_score,
-                    "status": status,
-                    "stage1_results": stage1,
-                    "stage2_results": stage2,
-                    "stage3_results": stage3,
-                    "gate5_results": gate5,
-                    "evaluated_at": datetime.now().isoformat()
-                }
+                failed_codes = [g.gate_code for g in gates if not g.passed or g.status == "FAIL"]
+                return self._build_report(npo, grant, gates, overall_status, total_score, failed_codes)
 
-                self._upsert_alert(org_id, grant["id"], grant["title"], total_score, report)
+    def _build_report(self, npo, grant, gates, overall_status, total_score, failed_gate_codes):
+        """統一レポートを構築し、DB に保存する"""
+        # 後方互換用の旧キーを生成
+        stage1_compat = Stage1RuleEvaluator.evaluate(npo, grant)
+        stage2_compat = Stage2DocumentMatcher.evaluate(npo, grant)
+
+        # Gate4 と Gate5 の旧形式を gates から取得
+        g4_dict = next((g.to_dict() for g in gates if g.gate_code == "GATE_4"), {})
+        g5_raw = next((g for g in gates if g.gate_code == "GATE_5"), None)
+        gate5_compat = {
+            "status": g5_raw.status if g5_raw else "SKIP",
+            "items": g5_raw.details.get("items", []) if g5_raw else [],
+            "reason": g5_raw.reason if g5_raw else ""
+        }
+
+        stage3_compat = {
+            "score": g4_dict.get("score", 80),
+            "criteria_scores": g4_dict.get("details", {}).get("criteria_scores", {}),
+            "evidence_quotes": g4_dict.get("details", {}).get("evidence_quotes", [])
+        }
+
+        report = {
+            "grant_id": grant["id"],
+            "grant_title": grant["title"],
+            "npo_profile_id": str(npo["id"]),
+            "npo_name": npo["name"],
+            "match_score": total_score,
+            "overall_status": overall_status,
+            "status": overall_status,  # 後方互換
+            "failed_gate_codes": failed_gate_codes,
+            "gates": [g.to_dict() for g in gates],
+            # 後方互換キー
+            "stage1_results": stage1_compat,
+            "stage2_results": stage2_compat,
+            "stage3_results": stage3_compat,
+            "gate5_results": gate5_compat,
+            "evaluated_at": datetime.now().isoformat()
+        }
+
+        self._upsert_alert(
+            str(npo["id"]), grant["id"], grant["title"],
+            total_score, overall_status, failed_gate_codes, report
+        )
 
         return report
 
-    def _upsert_alert(self, org_id: str, grant_id: int, title: str, score: int, report: Dict[str, Any]):
-        msg = f"要件適合スコア: {score}% | 未準備書類: {len(report['stage2_results']['missing'])}件"
+    def _upsert_alert(self, org_id: str, grant_id: int, title: str, score: int,
+                      overall_status: str, failed_gate_codes: List[str], report: Dict[str, Any]):
+        missing_count = len(report.get("stage2_results", {}).get("missing", []))
+        msg = f"要件適合スコア: {score}% | 未準備書類: {missing_count}件 | 判定: {overall_status}"
         report_json = json.dumps(report, ensure_ascii=False, default=str)
         try:
             with psycopg.connect(self.db_url) as conn:
@@ -506,26 +737,34 @@ class EligibilityChecker:
                     cur.execute(
                         """
                         INSERT INTO public.alerts
-                            (npo_profile_id, grant_id, alert_type, title, message, match_score, is_read, report_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, false, %s::jsonb)
+                            (npo_profile_id, grant_id, alert_type, title, message,
+                             match_score, is_read, report_json, overall_status, failed_gate_codes)
+                        VALUES (%s, %s, %s, %s, %s, %s, false, %s::jsonb, %s, %s)
                         ON CONFLICT ON CONSTRAINT uq_alerts_npo_grant_type
                         DO UPDATE SET
                             title = EXCLUDED.title,
                             message = EXCLUDED.message,
                             match_score = EXCLUDED.match_score,
                             report_json = EXCLUDED.report_json,
+                            overall_status = EXCLUDED.overall_status,
+                            failed_gate_codes = EXCLUDED.failed_gate_codes,
                             is_read = false,
                             created_at = NOW();
                         """,
-                        (org_id, grant_id, "ELIGIBILITY_MATCH", f"【適合率 {score}%】{title}", msg, score, report_json)
+                        (org_id, grant_id, "ELIGIBILITY_MATCH", f"【{overall_status}】{title}",
+                         msg, score, report_json, overall_status, failed_gate_codes)
                     )
                 conn.commit()
         except Exception as e:
             logging.warning(f"Could not save alert to DB: {e}")
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
-    parser = argparse.ArgumentParser(description="17-Item 3-Tier Hybrid Grant Eligibility Checker")
+    parser = argparse.ArgumentParser(description="6-Gate Grant Eligibility Checker")
     parser.add_argument("--org-id", required=True, help="NPO Profile UUID")
     parser.add_argument("--grant-id", required=True, help="Grant DB ID or source_grant_id")
     parser.add_argument("--json", action="store_true", help="Output in JSON format")
@@ -542,31 +781,42 @@ def main():
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         else:
+            overall = result["overall_status"]
+            status_icon = {"ELIGIBLE": "✅", "CONDITIONAL": "⚠️", "INELIGIBLE": "❌"}.get(overall, "❓")
+
             print("\n==================================================")
-            print(f" 助成金要件適合判定レポート (17項目チェック完了)")
+            print(f" 助成金要件適合判定レポート (6-Gate チェック)")
             print(f" 助成金: {result['grant_title']}")
             print(f" 団体名: {result['npo_name']}")
             print("==================================================")
-            print(f" 適合スコア: {result['match_score']}% (ステータス: {result['status']})")
-            print("\n【Stage 1: 確定ルール判定 (5項目)】", "ALL PASS" if result['stage1_results']['all_pass'] else "FAILED")
-            for k, v in result['stage1_results']['details'].items():
-                icon = "✅" if v['pass'] else "❌"
-                print(f"  {icon} {k}: {v['reason']}")
+            print(f" {status_icon} 判定: {overall} | スコア: {result['match_score']}%")
+            if result.get("failed_gate_codes"):
+                print(f" 不合格ゲート: {', '.join(result['failed_gate_codes'])}")
+            print()
 
-            print("\n【Stage 2: 提出書類チェック (4項目)】")
-            print(f"  - 準備済み: {', '.join(result['stage2_results']['prepared']) or 'なし'}")
-            print(f"  - 未準備: {', '.join(result['stage2_results']['missing']) or 'なし'}")
+            for gate in result.get("gates", []):
+                icon = "✅" if gate["passed"] else ("⚠️" if gate["status"] == "WARN" else "❌")
+                print(f"  [{gate['gate_code']}] {gate['gate_name']}: {icon} {gate['status']} (スコア: {gate['score']})")
 
-            print("\n【Stage 3: セマンティック適合度 (8項目)】", f"{result['stage3_results']['score']}%")
-            for k, v in result['stage3_results']['criteria_scores'].items():
-                print(f"  - {k}: {v}点")
+                # Gate 固有の詳細表示
+                if gate["gate_code"] in ("GATE_1",):
+                    for k, v in gate.get("details", {}).items():
+                        sub_icon = "✅" if v.get("pass") else "❌"
+                        print(f"    {sub_icon} {k}: {v.get('reason', '')}")
 
-            gate5 = result.get('gate5_results', {})
-            if gate5.get('status') != 'SKIP':
-                print(f"\n【Gate 5: 特定要件 RAG】 {gate5.get('status', 'N/A')}")
-                for item in gate5.get('items', []):
-                    icon = "✅" if item['status'] == 'PASS' else ("⚠️" if item['status'] == 'WARN' else "❌")
-                    print(f"  {icon} {item['grant_requirement'][:50]} → {item['similarity_score']:.2f}")
+                elif gate["gate_code"] == "GATE_4":
+                    for k, v in gate.get("details", {}).get("criteria_scores", {}).items():
+                        print(f"    - {k}: {v}点")
+
+                elif gate["gate_code"] == "GATE_5" and gate["status"] != "SKIP":
+                    for item in gate.get("details", {}).get("items", []):
+                        sub_icon = "✅" if item["status"] == "PASS" else ("⚠️" if item["status"] == "WARN" else "❌")
+                        print(f"    {sub_icon} {item['grant_requirement'][:50]} → {item['similarity_score']:.2f}")
+
+                elif gate["gate_code"] == "GATE_6":
+                    missing = gate.get("details", {}).get("missing", [])
+                    if missing:
+                        print(f"    未準備: {', '.join(missing)}")
 
             print("==================================================\n")
     except Exception as e:
