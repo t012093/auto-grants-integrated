@@ -51,6 +51,20 @@ uv run skills/past_award_analyzer/scripts/analyze_past_awards.py --grant-id 1 --
 
 ---
 
+## パラメーター仕様一覧
+
+### `analyze_past_awards.py`
+
+| パラメーター | 型 | 説明 | 使用例 |
+|---|---|---|---|
+| `--grant-id` | `int` | 対象助成金の DB ID（デフォルト: 1） | `--grant-id 42` |
+| `--org-id` | `string` | 自社団体 ID（勝因ギャップ分析を追加実行） | `--org-id "org-uuid-1234"` |
+| `--auto-fetch` | `flag` | 自動探索・分析モード | `--auto-fetch` |
+| `--register-json` | `string` | JSON データの直接登録（モード2） | `--register-json '[{...}]'` |
+| `--json` | `flag` | JSON 形式で結果出力 | `--json` |
+
+---
+
 ## 5 大分析視点 (SOP)
 
 ### Step 1: 採択事例データの自動収集・正規化
