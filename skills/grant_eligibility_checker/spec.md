@@ -5,7 +5,7 @@
 ### 1.1 目的・方針
 本システムは、登録団体のプロファイル・実ドキュメント (`public.npo_profiles`, `public.npo_documents`, `public.npo_knowledge_chunks`) と助成金データ (`public.grants`, `public.knowledge_chunks`) を照合し、**「6段階動的検問ゲート (6-Stage Agentic Gate System)」** によって厳格に要件適合判定を行うモジュールである。
 
-従来の平均点（〇〇%）による判定を全廃し、「1つでも必須条件を満たさなければ即不適合 (INELIGIBLE)」とする審査フローを完全再現する。また、**PDFページ番号付き確証引用 (Page Citation Grounding)** と **確定引用＋ローカルLLM要約** を組み合わせることで、ハルシネーション 0% の厳格な判定と説明責任（Explainability）を両立する。
+従来の平均点（〇〇%）による判定を全廃し、「1つでも必須条件を満たさなければ即不適合 (INELIGIBLE)」とする審査フローを完全再現する。また、**PDFページ番号付き確証引用 (Page Citation Grounding)** と **確定引用＋構造化テンプレート解説** を組み合わせることで、外部LLM不要・ハルシネーション 0% の厳格な判定と説明責任（Explainability）を両立する。
 
 ### 1.2 全体システム構成図 (Mermaid)
 
@@ -73,7 +73,7 @@ erDiagram
         uuid npo_profile_id FK
         int grant_id FK
         string overall_status "ELIGIBLE | CONDITIONAL | INELIGIBLE"
-        jsonb report_json "全6検問結果・引用・ページ数・LLM解説の完全ログ"
+        jsonb report_json "全6検問結果・引用・ページ数・解説テンプレートの完全ログ"
         string_array failed_gate_codes "不合格となった検問コードのリスト"
         timestamptz created_at "判定実行日時"
     }
@@ -226,18 +226,32 @@ CREATE INDEX IF NOT EXISTS idx_alerts_overall_status ON public.alerts(overall_st
   - `similarity >= 0.70`: `PASS` (十分な実績文脈あり)
   - `0.50 <= similarity < 0.70`: `WARN` (関連記述あり・要追記/要確認)
   - `similarity < 0.50`: `FAIL` (該当する実績・文脈なし)
-- **バッチ LLM 要約解説**:
-  `FAIL` または `WARN` の要求文を1つのバッチプロンプトにまとめ、**ローカルLLM** に渡して一括で `llm_explanation` と `user_advice` を生成する。
-  - **使用モデル**: Ollama `gemma3:4b` (優先) / フォールバック: `qwen3:4b`
-  - **バッチ戦略**: FAIL/WARN 項目を JSON 配列で1回のプロンプトに集約し、LLM 呼び出しは **Gate 5 全体で最大 1 回** に抑える。要求文が 15 件を超える場合は上位 15 件に切り詰める。
-  - **タイムアウト**: 30秒。超過時はテンプレートフォールバック (§7.3 参照)。
-  - **プロンプト構造**:
-    ```text
-    以下の助成金要件について、NPO団体の実績データとの適合度を分析してください。
-    各要件に対し、(1) 不適合の理由説明 (llm_explanation) と (2) ユーザーへの改善助言 (user_advice) を日本語で簡潔に返してください。
-    要件リスト: [{requirement, matched_evidence, similarity_score}, ...]
+- **構造化テンプレート解説生成** (外部LLM不要):
+  `FAIL` または `WARN` の要求文に対し、確定引用データ（要求文・マッチ実績・類似度）から **テンプレートベースで** `explanation` と `user_advice` を自動生成する。外部LLMに依存しないため、レイテンシ・コスト・ハルシネーションのリスクがゼロ。
+  - **テンプレート構造**:
+    ```python
+    def generate_explanation(item: dict) -> dict:
+        req = item["grant_requirement"]
+        evidence = item["npo_matched_evidence"]
+        sim = item["similarity_score"]
+        status = item["status"]
+
+        if status == "FAIL":
+            explanation = (
+                f"公募要件『{req}』に対する十分な関連実績が"
+                f"団体データ内に確認できませんでした (類似度: {sim:.2f})。"
+                f"最も近い実績: 『{evidence[:60]}』"
+            )
+        else:  # WARN
+            explanation = (
+                f"公募要件『{req}』に関連する記述が見つかりましたが、"
+                f"十分な適合とは判定できません (類似度: {sim:.2f})。"
+                f"関連実績: 『{evidence[:60]}』"
+            )
+        advice = "該当する実績がある場合は、団体プロファイルの実績情報にテキストを追記して再判定してください。"
+        return {"explanation": explanation, "user_advice": advice}
     ```
-  - **出力パース**: JSON配列として返却を期待。パース失敗時はテンプレートフォールバック。
+  - **将来拡張**: テンプレート生成で不十分な場合、MCP ツール (`auto-grants` サーバーの `research_answer` 等) を呼び出す拡張パスを後日追加可能。その際も `explanation` / `user_advice` のインターフェースは変更しない。
 - **Gate 5 全体のステータス判定ルール**:
   - `FAIL` 項目が 1 つ以上 → Gate 5 全体 `FAIL`
   - `FAIL` なし かつ `WARN` 項目が 1 つ以上 → Gate 5 全体 `WARN`
@@ -286,7 +300,7 @@ class Stage4MultiAxisSemanticEvaluator:
 
 class Stage5DynamicRAGGateEvaluator:
     @classmethod
-    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any], embedder: Any, llm_client: Any = None) -> GateResult: ...
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any], embedder: Any) -> GateResult: ...
 
 class Stage6DocumentEvaluator:
     @classmethod
@@ -355,7 +369,7 @@ class EligibilityChecker:
           "npo_matched_evidence": "地域NPOと連携し子ども向けプログラミング教育を実施",
           "similarity_score": 0.32,
           "status": "FAIL",
-          "llm_explanation": "公募要件は『都の就職支援事業を利用した若者の雇用実績』を求めていますが、貴団体のプロファイルにはプログラミング教育の実績のみで、該当する雇用記録が確認できません。",
+          "explanation": "公募要件は『都の就職支援事業を利用した若者の雇用実績』を求めていますが、貴団体のプロファイルにはプログラミング教育の実績のみで、該当する雇用記録が確認できません。",
           "user_advice": "※過去に該当する雇用実績がある場合は、団体プロファイルの「実績情報」にテキストを追記して再判定してください。"
         }
       ]
@@ -384,13 +398,10 @@ class EligibilityChecker:
 - ロード不可の場合は Gate 4 をルールベースキーワード検索に自動フォールバック (フォールバックスコア: 75点 → 閾値は `0.55 * 100 = 55` 以上で PASS とみなす)。
 - Gate 5 では Embedding 不可時に Gate 全体を `WARN` + `reason = 'Embeddingモデル未ロード'` として処理続行。
 
-### 7.3 ローカル LLM 障害 (Gate 5 解説生成)
-- **モデル優先順位**: Ollama `gemma3:4b-it` → `qwen3:4b` → テンプレートフォールバック
-- **接続先**: `http://localhost:11434/api/generate` (Ollama API)
-- **タイムアウト**: 30秒 (接続: 5秒 / 推論: 25秒)
-- **フォールバックテンプレート**:
+### 7.3 Gate 5 解説生成
+- テンプレートベースのため外部サービス障害の影響を受けない。
+- `similarity_score` や `npo_matched_evidence` が空の場合は汎用テンプレートで補完:
   ```text
-  llm_explanation: 「公募要件『{requirement}』に対する十分な関連実績が団体データ内に確認できませんでした (類似度: {similarity_score:.2f})」
+  explanation: 「公募要件『{requirement}』に対応する実績データが登録されていません」
   user_advice: 「該当する実績がある場合は、団体プロファイルの実績情報にテキストを追記して再判定してください」
   ```
-- フォールバック発動時は `report_json` 内に `"llm_fallback": true` フラグを付与。
