@@ -1,42 +1,118 @@
 # スキル仕様書: 6段階動的検問ゲート適合チェッカー (check_eligibility.py)
 
-## 1. 概要 & 目的
-登録団体のプロファイル情報・書類 (`public.npo_profiles` / `public.npo_documents` / `public.npo_knowledge_chunks`) と助成金の公募要件 (`public.grants` / `public.knowledge_chunks`) を受け取り、**全 6 段階の動的検問ゲート (6-Stage Agentic Gate System)** で判定を行います。
+## 1. システム概要 & アーキテクチャ設計
 
-曖昧なスコア平均化を撤廃し、「1つでも必須要件を満たさなければ失格」とする実務審査フローを完全再現します。また、**PDFページ番号付き確証引用 (Page Citation Grounding)** と **ローカルLLMによる読み解き解説** により、ハルシネーション0%かつトレーサブルな判定結果を `public.alerts` に保存します。
+### 1.1 目的・方針
+本システムは、登録団体のプロファイル・実ドキュメント (`public.npo_profiles`, `public.npo_documents`, `public.npo_knowledge_chunks`) と助成金データ (`public.grants`, `public.knowledge_chunks`) を照合し、**「6段階動的検問ゲート (6-Stage Agentic Gate System)」** によって厳格に要件適合判定を行うモジュールである。
+
+従来の平均点（〇〇%）による判定を全廃し、「1つでも必須条件を満たさなければ即不適合 (INELIGIBLE)」とする審査フローを完全再現する。また、**PDFページ番号付き確証引用 (Page Citation Grounding)** と **確定引用＋ローカルLLM要約** を組み合わせることで、ハルシネーション 0% の厳格な判定と説明責任（Explainability）を両立する。
+
+### 1.2 全体システム構成図 (Mermaid)
+
+```mermaid
+erDiagram
+    npo_profiles ||--o{ npo_documents : "1:N (実ファイルメタデータ)"
+    npo_profiles ||--o{ npo_knowledge_chunks : "1:N (実績・定款ベクトル)"
+    grants ||--o{ knowledge_chunks : "1:N (PDFページ付ベクトル)"
+    npo_profiles ||--o{ alerts : "1:N (判定通知)"
+    grants ||--o{ alerts : "1:N (判定結果)"
+
+    npo_profiles {
+        uuid id PK
+        string name "団体名"
+        string organization_type "法人種別 (NPO_CORPORATION等)"
+        int establishment_year "設立年"
+        bigint annual_budget "前年事業予算"
+        string headquarter_location "主たる事務所 (本店所在地)"
+        string_array branch_locations "従たる事務所 (支店・営業所)"
+        string_array activity_areas "事業実施地域 (活動エリア)"
+        string_array prepared_documents "準備済み提出書類リスト"
+    }
+
+    npo_documents {
+        uuid id PK
+        uuid npo_profile_id FK
+        string doc_type "ARTICLES | FINANCIAL_REPORT | REGISTRY_CERTIFICATE etc."
+        string file_name "ファイル名"
+        string file_path "ストレージ保存パス"
+        date issued_date "発行年月日"
+        boolean is_verified "確認済みフラグ"
+    }
+
+    npo_knowledge_chunks {
+        uuid id PK
+        uuid npo_profile_id FK
+        string chunk_type "TRACK_RECORDS | QUALIFICATIONS | ARTICLES etc."
+        text content "実績・資格・定款・事業内容の原文テキスト"
+        vector_1024 embedding "BAAI/bge-m3 ベクトル表現"
+    }
+
+    grants {
+        int id PK
+        string title "助成金・補助金名称"
+        string provider "主催団体 / 官公庁"
+        bigint amount_max "助成上限額"
+        date deadline "公募締切日"
+        string target_area "対象地域 (都道府県/全国)"
+        string location_requirement_type "HEADQUARTER_ONLY | BRANCH_ALLOWED | ACTIVITY_AREA_ONLY"
+        string_array requirement_sentences "公募要領から抽出した特定要求文リスト"
+        string status "OPEN / CLOSED"
+    }
+
+    knowledge_chunks {
+        uuid id PK
+        int grant_id FK
+        string chunk_type "EVALUATION | INTENT | REQUIREMENT"
+        text content "公募要領の本文テキスト"
+        int page_number "PDF内の発生ページ番号 (1〜N)"
+        vector_1024 embedding "BAAI/bge-m3 ベクトル表現"
+    }
+
+    alerts {
+        bigint id PK
+        uuid npo_profile_id FK
+        int grant_id FK
+        string overall_status "ELIGIBLE | CONDITIONAL | INELIGIBLE"
+        jsonb report_json "全6検問結果・引用・ページ数・LLM解説の完全ログ"
+        string_array failed_gate_codes "不合格となった検問コードのリスト"
+        timestamptz created_at "判定実行日時"
+    }
+```
 
 ---
 
-## 2. データベースマイグレーション DDL 仕様
+## 2. データベース DDL & マイグレーション詳細仕様
 
-新仕様を適用するため、以下の DDL マイグレーション (`supabase/migrations/20260802_add_page_num_and_documents.sql`) を実行します。
+本機能の適用には以下の SQL マイグレーション (`20260802_add_page_num_and_documents.sql`) を実行する。
 
 ```sql
--- 1. npo_knowledge_chunks の UNIQUE 制約緩和 (複数チャンク保存対応)
+-- 1. npo_knowledge_chunks の UNIQUE 制約緩和 (同一団体・同一タイプの複数実績保存に対応)
 ALTER TABLE public.npo_knowledge_chunks DROP CONSTRAINT IF EXISTS uq_npo_chunk_type;
 ALTER TABLE public.npo_knowledge_chunks DROP CONSTRAINT IF EXISTS uq_npo_knowledge_chunks_type;
+CREATE INDEX IF NOT EXISTS idx_npo_knowledge_chunks_lookup ON public.npo_knowledge_chunks(npo_profile_id, chunk_type);
 
--- 2. knowledge_chunks (助成金チャンク) に page_number 追加
+-- 2. knowledge_chunks (助成金チャンク) に page_number カラムを追加
 ALTER TABLE public.knowledge_chunks ADD COLUMN IF NOT EXISTS page_number INTEGER DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_page ON public.knowledge_chunks(grant_id, page_number);
 
--- 3. grants に requirement_sentences カラム追加
+-- 3. grants テーブルに特定要求文リストカラムを追加
 ALTER TABLE public.grants ADD COLUMN IF NOT EXISTS requirement_sentences TEXT[] DEFAULT '{}'::TEXT[];
+ALTER TABLE public.grants ADD COLUMN IF NOT EXISTS location_requirement_type TEXT DEFAULT 'BRANCH_ALLOWED';
 
--- 4. npo_documents (書類メタデータ管理) テーブル新規作成
+-- 4. public.npo_documents (書類メタデータ管理テーブル) の新規作成
 CREATE TABLE IF NOT EXISTS public.npo_documents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
-  doc_type TEXT NOT NULL, -- 'ARTICLES', 'FINANCIAL_REPORT', 'REGISTRY_CERTIFICATE' etc.
+  doc_type TEXT NOT NULL,
   file_name TEXT NOT NULL,
   file_path TEXT NOT NULL,
-  issued_date DATE,        -- 発行年月日 (登記簿3ヶ月制限等の判定用)
+  issued_date DATE,
   is_verified BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_npo_documents_profile ON public.npo_documents(npo_profile_id);
 
--- 5. alerts テーブルの拡張 (6ゲートレポート保存)
+-- 5. alerts テーブルの拡張 (構造化検問レポート保存用)
 ALTER TABLE public.alerts ADD COLUMN IF NOT EXISTS overall_status TEXT DEFAULT 'INELIGIBLE';
 ALTER TABLE public.alerts ADD COLUMN IF NOT EXISTS report_json JSONB DEFAULT '{}'::JSONB;
 ALTER TABLE public.alerts ADD COLUMN IF NOT EXISTS failed_gate_codes TEXT[] DEFAULT '{}'::TEXT[];
@@ -45,77 +121,171 @@ CREATE INDEX IF NOT EXISTS idx_alerts_overall_status ON public.alerts(overall_st
 
 ---
 
-## 3. PDF パース ＆ 要求文抽出仕様 (`extract_pdf.py`)
+## 3. データ抽出・解析パイプライン仕様
 
-### ① ページ番号ブロック分断 (`page_number` 割り当て)
-PyMuPDF (`fitz`) パース時、ページごとに `page.get_text("blocks")` をループ処理し、各テキストチャンク発生時のページ番号 (`page_number: 1〜N`) を保持して `knowledge_chunks` にレコード登録します。
+### 3.1 PDF 解析 & ページ番号分断 (`skills/jgrants_search/scripts/extract_pdf.py`)
+1. **PyMuPDF (`fitz`) ブロック読み込み**:
+   `doc = fitz.open(stream=pdf_bytes)` で開いた後、ページごとの `page.get_text("blocks")` をループ走査し、各テキストブロックごとに `page_number = page.number + 1` を付与する。
+2. **チャンク保存**:
+   `knowledge_chunks` テーブルにレコード挿入する際、`page_number` カラムに正確な発生ページ番号を格納する。
 
-### ② 要求文 (`requirement_sentences`) の決定論的抽出
-公募要領本文から「対象要件」「応募資格」セクションを検出し、箇条書き（`〇`, `・`, `(1)`, `①`）または文末パターン（`〜すること` `〜であること` `〜を有する法人`）をトリガーとして独立した要求文配列 `requirement_sentences` に分割抽出します。
+### 3.2 所在地要件パターンパース
+`extract_location_requirement_deterministic(text: str) -> str`
+- **`HEADQUARTER_ONLY` パターン**: `r"(主たる事務所|登記簿|本社所在地|登記地).*?(に限る|必須|対象とする|のみ)"`
+- **`ACTIVITY_AREA_ONLY` パターン**: `r"(事業実施場所|活動エリア|現地|現場).*?(のみ|を実施すること|で事業を行う)"` (かつ「拠点」「支店」の記載がない場合)
+- **`BRANCH_ALLOWED` パターン**: 上記以外（デフォルト）
+
+### 3.3 特定要求文パース (`extract_requirement_sentences`)
+`extract_requirement_sentences(text: str) -> List[str]`
+- 公募要領から「応募資格」「対象要件」「助成対象」セクションを抽出。
+- 箇条書き記号 (`〇`, `・`, `(1)`, `①`, `【要件】`) または文末修飾子 (`〜すること`, `〜であること`, `〜を有する法人`, `〜を満たすこと`) を基準に文章を分割。
+- 重複および 10 文字未満の短文を除外し、最大 15 個の要件文リストとして `grants.requirement_sentences` に配列保存。
 
 ---
 
-## 4. 6 段階動的検問ゲート判定仕様
+## 4. 6 段階動的検問ゲート (6-Stage Agentic Gate System) アルゴリズム詳細
 
 ```text
-[公募助成金] ──► [検問1: 基本要件 (法人型・年数・期限)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
-                 │ PASS (SQL確定的チェック)
-                 ▼
-                [検問2: 拠点要件 (本店/支店/活動地)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
-                 │ PASS (多重拠点ロジカル検証)
-                 ▼
-                [検問3: 予算規模 (上限比率50%制限)]  ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
-                 │ PASS (数値計算)
-                 ▼
-                [検問4: 多軸分野適合ゲート]          ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
-                 │ PASS (3軸: 活動分野/ターゲット/事業目的 最小値 >= 0.55)
-                 ▼
-                [検問5: 特定要件動的 RAG 検索]       ──► FAIL ➔ 🔴 不適合 / WARN ➔ 🟡 条件付き適合
-                 │ (助成金要求文 ➔ NPO知識チャンクへ正方向ベクトル検索 ➔ ページ番号引用 ➔ LLM読み解き)
-                 ▼
-                [検問6: 提出書類準備率チェック]     ──► WARN ➔ 🟡 要書類手配
-                 │ (集合差分判定)
-                 ▼
-                🟢 完全適合 (ELIGIBLE: 全検問をクリア)
+               ┌────────────────────────────────────────────────────────┐
+               │ 6-Stage Gate Evaluator (check_eligibility.py)          │
+               └──────────────────────────┬─────────────────────────────┘
+                                          │
+    ┌─────────────────────────────────────┼─────────────────────────────────────┐
+    │                                     │                                     │
+    ▼                                     ▼                                     ▼
+┌──────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐
+│ Gate 1: 基本ルール (SQL)  │  │ Gate 2: 拠点要件 (多重)  │  │ Gate 3: 予算規模比率50%  │
+│ 法人型/活動年数/公募期限 │  │ 本店/支店/活動エリア検証 │  │ 助成上限 <= 年予算 * 0.5 │
+└────────────┬─────────────┘  └────────────┬─────────────┘  └────────────┬─────────────┘
+             │                            │                            │
+             └────────────────────────────┼────────────────────────────┘
+                                          │ ALL PASS
+                                          ▼
+┌──────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐
+│ Gate 4: 多軸セマンティック│  │ Gate 5: 動的 RAG 検索    │  │ Gate 6: 書類網羅性 & 日付 │
+│ 3軸最小値 >= 0.55 足切り │  │ 助成金要件 -> NPOチャンク│  │ 差分集合 + 3ヶ月制限判定 │
+└──────────────────────────┘  └──────────────────────────┘  └──────────────────────────┘
 ```
 
-### 【Gate 4: 多軸分野適合ゲートのキャリブレーション】
-- 単一類似度ではなく、**活動分野 (`ACTIVITY_TAGS`)・ターゲット層 (`TARGET_AUDIENCE`)・事業目的 (`DESCRIPTION`) の 3 軸個別類似度** を算出し、その**最小値 (Min Score)** で判定。
-- **閾値 (Threshold)**: `0.55` (BGE-M3 日本語コサイン類似度のキャリブレーション値)。3 軸中 1 つでも `0.55` 未満の場合は FAIL とする。
+### 4.1 各検問の判定詳細仕様
 
-### 【Gate 5: 動的 RAG 検索の正しい検索方向】
-助成金の箇条書き要求文 (`requirement_sentences`) 1 文ごとに、**団体側知識チャンク (`npo_knowledge_chunks`) に対して正方向検索** を実行します。
+#### 【Gate 1: 基本ルール判定 (GATE_1_BASIC_RULES)】
+- **organization_type**: `npo.organization_type IN grant.eligible_org_types`
+- **years_active**: `(現在年 - npo.establishment_year) >= grant.min_years_active` (未設定時は 0年)
+- **grant_status**: `grant.status == 'OPEN'` かつ `grant.deadline >= 現在日`
+- **不合格条件**: 1項目でも不一致があれば `FAIL` ➔ 総合ステータス `INELIGIBLE` で打切り。
 
-```sql
--- 正しい検索方向: 助成金要求文 (req_embedding) ➔ NPO知識チャンクの最近傍
-SELECT nkc.content, nkc.chunk_type, 1 - (nkc.embedding <=> %s::vector) AS similarity
-FROM public.npo_knowledge_chunks nkc
-WHERE nkc.npo_profile_id = %s
-ORDER BY nkc.embedding <=> %s::vector
-LIMIT 1;
-```
+#### 【Gate 2: 所在地・拠点要件判定 (GATE_2_LOCATION)】
+- **`HEADQUARTER_ONLY` の場合**: `grant_area == '全国'` または `grant_area` が `npo.headquarter_location` (フォールバック: `npo.location`) に部分一致。
+- **`BRANCH_ALLOWED` の場合**: `grant_area == '全国'` または `grant_area` が `[headquarter_location] + branch_locations` のいずれかに一致。
+- **`ACTIVITY_AREA_ONLY` の場合**: `grant_area == '全国'` または `grant_area` が `activity_areas` のいずれかに一致。
+- **不合格条件**: 不適合時は `FAIL` ➔ 理由 `「公募エリア '東京都' (本店限定要件) vs 本店拠点 '富山県富山市'」` ➔ 総合ステータス `INELIGIBLE` で打切り。
 
-#### スコア判定基準
-* **類似度 >= 0.70**: PASS (十分な実績エビデンスあり)
-* **0.50 <= 類似度 < 0.70**: WARN (関連記述あり・要補強)
-* **類似度 < 0.50**: FAIL (該当する実績・文脈なし)
+#### 【Gate 3: 予算規模整合性判定 (GATE_3_BUDGET)】
+- **計算式**: `grant.amount_max <= npo.annual_budget * 0.50`
+- **不合格条件**: 超過時は `FAIL` ➔ 理由 `「助成上限 13,700,000円 / 前年予算 10,000,000円 (比率 137.0% > 50%上限)」` ➔ 総合 `INELIGIBLE` で打切り。
 
-### 【LLM 読み解き解説の実行・バッチ設計】
-Gate 5 で FAIL または WARN と判定された項目のみをバッチにまとめ、ローカルLLM (Ollama または Antigravity 追論) へ 1 回のバッチリクエストで渡し、自然な日本語理由 (`llm_explanation`) とユーザー追記アドバイス (`user_advice`) を一括生成します。
+#### 【Gate 4: 多軸分野適合セマンティックゲート (GATE_4_MULTI_AXIS_SEMANTIC)】
+- **計算式**: 以下の 3 軸の個別の類似度を `BAAI/bge-m3` で計算し、**その最小値 (Min Score)** を求める。
+  1. `sim_activity` = `npo_chunk(chunk_type='ACTIVITY_TAGS')` vs `grant_chunks`
+  2. `sim_target` = `npo_chunk(chunk_type='TARGET_AUDIENCE')` vs `grant_chunks`
+  3. `sim_purpose` = `npo_chunk(chunk_type='DESCRIPTION')` vs `grant_chunks`
+- **キャリブレーション閾値**: `min(sim_activity, sim_target, sim_purpose) >= 0.55`
+- **不合格条件**: 最小値が `0.55` 未満の場合は `FAIL` ➔ 理由 `「多軸類似度最小値 0.42 (ターゲット層不一致) < 0.55」` ➔ 総合 `INELIGIBLE` で打切り。
+
+#### 【Gate 5: 特定要件動的 RAG 検索 & 自己検証 (GATE_5_SPECIFIC_RAG_REQUIREMENTS)】
+- **検索クエリ**: `grant.requirement_sentences` の各要求文 1 文ずつ。
+- **SQL クエリ (正方向検索)**:
+  ```sql
+  SELECT nkc.content, nkc.chunk_type, 1 - (nkc.embedding <=> %s::vector) AS similarity
+  FROM public.npo_knowledge_chunks nkc
+  WHERE nkc.npo_profile_id = %s
+  ORDER BY nkc.embedding <=> %s::vector
+  LIMIT 1;
+  ```
+- **項目のステータス判定**:
+  - `similarity >= 0.70`: `PASS` (十分な実績文脈あり)
+  - `0.50 <= similarity < 0.70`: `WARN` (関連記述あり・要追記/要確認)
+  - `similarity < 0.50`: `FAIL` (該当する実績・文脈なし)
+- **バッチ LLM 要約解説**:
+  `FAIL` または `WARN` の要求文を1つのバッチプロンプトにまとめ、ローカルLLM (Ollama または Antigravity 推論) に渡して一括で `llm_explanation` と `user_advice` を生成。
+- **Gate 5 全体のステータス**: `FAIL` 項目が 1 つ以上あれば全体 `FAIL` (または `WARN`)。
+
+#### 【Gate 6: 書類網羅性 & 日付検証 (GATE_6_DOCUMENTS)】
+- **書類差分**: `missing_docs = grant.required_documents - npo.prepared_documents`
+- **日付検証**: `REGISTRY_CERTIFICATE` (登記簿) の場合、`npo_documents.issued_date` が現在日から 3 か月以内か検証。
+- **ステータス判定**: 欠品あり または 発行日超過の場合 `WARN` (要準備)。
 
 ---
 
-## 5. 判定レポート出力フォーマット (Report Output Schema)
+## 5. クラス定義・Python 関数シグネチャ仕様
+
+`skills/grant_eligibility_checker/scripts/check_eligibility.py` 内の主要クラスと型定義：
+
+```python
+from typing import Dict, Any, List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class GateResult:
+    gate_code: str
+    gate_name: str
+    status: str  # 'PASS' | 'WARN' | 'FAIL'
+    reason: str
+    details: Optional[Dict[str, Any]] = None
+    items: Optional[List[Dict[str, Any]]] = None
+
+class Stage1RuleEvaluator:
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult: ...
+
+class Stage2LocationEvaluator:
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult: ...
+
+class Stage3BudgetEvaluator:
+    @staticmethod
+    def evaluate(npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult: ...
+
+class Stage4MultiAxisSemanticEvaluator:
+    @classmethod
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult: ...
+
+class Stage5DynamicRAGGateEvaluator:
+    @classmethod
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any], embedder: Any, llm_client: Any = None) -> GateResult: ...
+
+class Stage6DocumentEvaluator:
+    @classmethod
+    def evaluate(cls, cur: Any, npo: Dict[str, Any], grant: Dict[str, Any]) -> GateResult: ...
+
+class EligibilityChecker:
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+
+    def run(self, org_id: str, grant_id: str) -> Dict[str, Any]:
+        """
+        全 6 段階検問ゲートを走査し、総合ステータス (ELIGIBLE / CONDITIONAL / INELIGIBLE)
+        および構造化 JSON レポートを返却し、public.alerts テーブルに保存する。
+        """
+        ...
+```
+
+---
+
+## 6. 判定結果データ構造 (Report Output JSON Schema)
 
 ```json
 {
   "grant_id": 2,
   "grant_title": "東京都若者世代職場定着促進助成金（令和８年度第４回申請受付）",
-  "npo_profile_id": "uuid-1234-5678",
+  "npo_profile_id": "018f67bc-1234-7000-8000-000000000001",
   "npo_name": "特定非営利活動法人 Open Coral Network",
   "overall_status": "CONDITIONAL",
   "passed_gates": 5,
   "total_gates": 6,
+  "failed_gate_codes": ["GATE_5_SPECIFIC_RAG_REQUIREMENTS"],
   "gates": [
     {
       "gate_code": "GATE_1_BASIC_RULES",
@@ -165,6 +335,18 @@ Gate 5 で FAIL または WARN と判定された項目のみをバッチにま�
       "reason": "必要書類 0件 未準備"
     }
   ],
-  "evaluated_at": "2026-08-02T18:30:00Z"
+  "evaluated_at": "2026-08-02T18:35:00Z"
 }
 ```
+
+---
+
+## 7. エラーハンドリング・フォールバック・ログ仕様
+
+1. **DB未接続 / レコード不存在時**:
+   - `strict=True` の場合は即座に `ValueError` を送出。
+   - `strict=False` の場合は全検問を `WARN` とし、`overall_status = 'CONDITIONAL'`, `reason = 'DB未接続のため標準フォールバック判定'` を返却。
+2. **Embedding 生成モデル未ロード時**:
+   - 遅延ロード (`@property model`) で `BAAI/bge-m3` を自動ロード。ロード不可の場合はルールベースキーワード検索に自動フォールバック。
+3. **ローカルLLM未起動・タイムアウト時**:
+   - 確定引用＋事前定義テンプレートテキスト (`llm_explanation = 「【要件】... に対する十分な関連実績が団体データ内に確認できませんでした」`) に自動フォールバック。
