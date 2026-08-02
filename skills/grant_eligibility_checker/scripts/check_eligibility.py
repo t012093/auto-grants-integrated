@@ -26,6 +26,33 @@ load_dotenv(dotenv_path=env_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# 47都道府県リスト (前方一致正規化用)
+PREFECTURES = [
+    "北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県",
+    "茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県",
+    "新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県", "岐阜県",
+    "静岡県", "愛知県", "三重県", "滋賀県", "京都府", "大阪府", "兵庫県",
+    "奈良県", "和歌山県", "鳥取県", "島根県", "岡山県", "広島県", "山口県",
+    "徳島県", "香川県", "愛媛県", "高知県", "福岡県", "佐賀県", "長崎県",
+    "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県",
+]
+
+
+def normalize_prefecture(text: str) -> str:
+    """テキストから都道府県名を前方一致で抽出。見つからなければ原文を返す。"""
+    for p in PREFECTURES:
+        if text.startswith(p):
+            return p
+    return text
+
+
+def area_match(grant_area: str, location: str) -> bool:
+    """都道府県レベルで地域が一致するか判定。'京都' in '東京都' の誤判定を防止。"""
+    if "全国" in location:
+        return True
+    return normalize_prefecture(grant_area) == normalize_prefecture(location)
+
+
 
 class Stage1RuleEvaluator:
     """Stage 1: Rule-based Deterministic Evaluation (0% Hallucination - 5 Items)"""
@@ -73,17 +100,17 @@ class Stage1RuleEvaluator:
             reason = f"公募エリア '{grant_area}' (全国開放枠)"
         elif req_type == "HEADQUARTER_ONLY":
             check_target = hq_loc or legacy_loc
-            area_pass = (grant_area in check_target) or (check_target in grant_area) or ("全国" in check_target)
+            area_pass = area_match(grant_area, check_target)
             reason = f"公募エリア '{grant_area}' (本店限定要件) vs 本店拠点 '{check_target}'"
         elif req_type == "ACTIVITY_AREA_ONLY":
             check_list = activities or ([legacy_loc] if legacy_loc else [])
-            area_pass = any(grant_area in a or a in grant_area or "全国" in a for a in check_list)
+            area_pass = any(area_match(grant_area, a) for a in check_list)
             reason = f"公募エリア '{grant_area}' (事業実施地要件) vs 活動地域 {check_list}"
         else:  # BRANCH_ALLOWED (デフォルト)
             check_list = ([hq_loc] if hq_loc else []) + list(branches)
             if not check_list and legacy_loc:
                 check_list = [legacy_loc]
-            area_pass = any(grant_area in c or c in grant_area or "全国" in c for c in check_list)
+            area_pass = any(area_match(grant_area, c) for c in check_list)
             reason = f"公募エリア '{grant_area}' (支店認容要件) vs 本店・支店拠点 {check_list}"
 
         results["target_area"] = {

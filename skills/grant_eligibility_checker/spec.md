@@ -203,8 +203,8 @@ def area_match(grant_area: str, location: str) -> bool:
     return normalize_prefecture(grant_area) == normalize_prefecture(location)
 ```
 
-> [!WARNING]
-> 現行実装 ([L76](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_eligibility_checker/scripts/check_eligibility.py#L76)) は `in` 部分一致を使用しており、上記の `area_match` は **未実装（要修正）**。
+
+
 
 ### 4.3 Stage 2: 書類差分チェック
 
