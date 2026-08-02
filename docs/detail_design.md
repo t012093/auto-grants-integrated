@@ -1062,6 +1062,47 @@ RAG適合判定時に、LLM (Gemini/Claude) を用いて助成金に対する団
     *   **民間 (PRIVATE)**: 財団ごとの簡略化された報告フロー、または中間支援組織を通じた柔軟な経費報告基準を反映。
 ```
 
+
+## 6.5 17項目ハイブリッド 6段階動的検問ゲート (6-Stage Agentic Gate System) 詳細設計
+
+登録団体のプロファイル情報・実ドキュメント (`public.npo_profiles`, `public.npo_documents`, `public.npo_knowledge_chunks`) と助成金データ (`public.grants`, `public.knowledge_chunks`) を受け取り、全6段階の動的検問ゲートで判定を行うモジュール `skills/grant_eligibility_checker/scripts/check_eligibility.py` の物理詳細設計。
+
+### 6.5.1 6段階検問フロー & アーキテクチャ
+
+```text
+[公募助成金] ──► [検問1: 基本要件 (SQL)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
+                 │ PASS
+                 ▼
+                [検問2: 拠点要件 (多重)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
+                 │ PASS
+                 ▼
+                [検問3: 予算規模 (50%上限)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
+                 │ PASS
+                 ▼
+                [検問4: 多軸分野適合]    ──► FAIL ➔ 🔴 不適合 (Min Score < 0.55)
+                 │ PASS
+                 ▼
+                [検問5: 特定要件動的 RAG]──► FAIL ➔ 🔴 不適合 / WARN ➔ 🟡 条件付き適合
+                 │ (助成金要件文 ➔ NPOチャンクへ正方向ベクトル検索 ➔ ページ番号引用 ➔ AI理由判定)
+                 ▼
+                [検問6: 書類準備率]      ──► WARN ➔ 🟡 要書類手配
+                 │ PASS
+                 ▼
+                🟢 完全適合 (ELIGIBLE: 全検問クリア)
+```
+
+### 6.5.2 データベース DDL & 書類3層保存設計
+
+1. **`public.npo_documents` (書類メタデータ管理)**:
+   - 実ファイル階層 (`storage/npo_documents/<npo_id>/<doc_type>/...`) とDBの紐付け。
+   - 発行日 (`issued_date`) による登記簿3ヶ月制限等の自動検問。
+2. **`public.knowledge_chunks` のページ番号保持**:
+   - `page_number` (INTEGER) を保持し、判定理由から `file:///path/to/grant_guide.pdf#page=3` への直リンクを出力。
+3. **`public.npo_knowledge_chunks` の制約緩和**:
+   - UNIQUE制約 `uq_npo_chunk_type` を解除し、実績・資格・定款などの複数チャンク保存を解禁。
+4. **`public.alerts` レポート保存構造**:
+   - `overall_status` (`ELIGIBLE` | `CONDITIONAL` | `INELIGIBLE`), `report_json` (JSONB), `failed_gate_codes` (TEXT[])。
+
 ---
 
 ## 7. フロントエンド API エンドポイント仕様 (Single Source of Truth)
