@@ -128,12 +128,20 @@ CREATE INDEX IF NOT EXISTS idx_alerts_overall_status ON public.alerts(overall_st
    `doc = fitz.open(stream=pdf_bytes)` で開いた後、ページごとの `page.get_text("blocks")` をループ走査し、各テキストブロックごとに `page_number = page.number + 1` を付与する。
 2. **チャンク保存**:
    `knowledge_chunks` テーブルにレコード挿入する際、`page_number` カラムに正確な発生ページ番号を格納する。
+3. **ページ境界チャンク割当ルール**:
+   500文字チャンク分割時にページ境界を跨ぐ場合、**チャンク開始位置のページ番号** を `page_number` として採用する。具体的には、PyMuPDF パース時に各テキストブロックの `(text, page_number)` タプルのリストを保持し、チャンク分割後に `chunk_start_offset` がどのブロック範囲に属するかで `page_number` を逆算する。
+   ```python
+   # ページ割当の疑似コード
+   for chunk in chunks:
+       chunk.page_number = page_map.get_page_at_offset(chunk.start_offset)
+   ```
 
 ### 3.2 所在地要件パターンパース
 `extract_location_requirement_deterministic(text: str) -> str`
-- **`HEADQUARTER_ONLY` パターン**: `r"(主たる事務所|登記簿|本社所在地|登記地).*?(に限る|必須|対象とする|のみ)"`
-- **`ACTIVITY_AREA_ONLY` パターン**: `r"(事業実施場所|活動エリア|現地|現場).*?(のみ|を実施すること|で事業を行う)"` (かつ「拠点」「支店」の記載がない場合)
+- **`HEADQUARTER_ONLY` パターン**: `r"(主たる事務所|登記簿|本社所在地|登記地)[\s\S]{0,60}?(に限る|必須|対象とする|のみ)"`
+- **`ACTIVITY_AREA_ONLY` パターン**: `r"(事業実施場所|活動エリア|現地|現場)[\s\S]{0,60}?(のみ|を実施すること|で事業を行う)"` (かつ「拠点」「支店」の記載がない場合)
 - **`BRANCH_ALLOWED` パターン**: 上記以外（デフォルト）
+- **距離制限**: `.*?` ではなく `[\s\S]{0,60}?` を使用し、キーワードと修飾子の間が最大60文字以内のみマッチさせる。全文一行化後の遠距離誤マッチを防止する。
 
 ### 3.3 特定要求文パース (`extract_requirement_sentences`)
 `extract_requirement_sentences(text: str) -> List[str]`
@@ -176,9 +184,20 @@ CREATE INDEX IF NOT EXISTS idx_alerts_overall_status ON public.alerts(overall_st
 - **不合格条件**: 1項目でも不一致があれば `FAIL` ➔ 総合ステータス `INELIGIBLE` で打切り。
 
 #### 【Gate 2: 所在地・拠点要件判定 (GATE_2_LOCATION)】
-- **`HEADQUARTER_ONLY` の場合**: `grant_area == '全国'` または `grant_area` が `npo.headquarter_location` (フォールバック: `npo.location`) に部分一致。
-- **`BRANCH_ALLOWED` の場合**: `grant_area == '全国'` または `grant_area` が `[headquarter_location] + branch_locations` のいずれかに一致。
-- **`ACTIVITY_AREA_ONLY` の場合**: `grant_area == '全国'` または `grant_area` が `activity_areas` のいずれかに一致。
+- **地域マッチングアルゴリズム (都道府県前方一致)**:
+  単純な `in` 部分一致ではなく、**都道府県名の前方一致** を行う。`"京都" in "東京都千代田区"` が `True` となる誤判定を防止するため、以下のロジックを採用する:
+  ```python
+  PREFECTURES = ["北海道","青森県","岩手県",...,"沖縄県"]  # 47都道府県
+  def normalize_prefecture(text: str) -> str:
+      for p in PREFECTURES:
+          if text.startswith(p): return p
+      return text  # フォールバック
+  def area_match(grant_area: str, location: str) -> bool:
+      return normalize_prefecture(grant_area) == normalize_prefecture(location)
+  ```
+- **`HEADQUARTER_ONLY` の場合**: `grant_area == '全国'` または `area_match(grant_area, npo.headquarter_location)` (フォールバック: `npo.location`)。
+- **`BRANCH_ALLOWED` の場合**: `grant_area == '全国'` または `[headquarter_location] + branch_locations` のいずれかが `area_match` で一致。
+- **`ACTIVITY_AREA_ONLY` の場合**: `grant_area == '全国'` または `activity_areas` のいずれかが `area_match` で一致。
 - **不合格条件**: 不適合時は `FAIL` ➔ 理由 `「公募エリア '東京都' (本店限定要件) vs 本店拠点 '富山県富山市'」` ➔ 総合ステータス `INELIGIBLE` で打切り。
 
 #### 【Gate 3: 予算規模整合性判定 (GATE_3_BUDGET)】
@@ -208,8 +227,21 @@ CREATE INDEX IF NOT EXISTS idx_alerts_overall_status ON public.alerts(overall_st
   - `0.50 <= similarity < 0.70`: `WARN` (関連記述あり・要追記/要確認)
   - `similarity < 0.50`: `FAIL` (該当する実績・文脈なし)
 - **バッチ LLM 要約解説**:
-  `FAIL` または `WARN` の要求文を1つのバッチプロンプトにまとめ、ローカルLLM (Ollama または Antigravity 推論) に渡して一括で `llm_explanation` と `user_advice` を生成。
-- **Gate 5 全体のステータス**: `FAIL` 項目が 1 つ以上あれば全体 `FAIL` (または `WARN`)。
+  `FAIL` または `WARN` の要求文を1つのバッチプロンプトにまとめ、**ローカルLLM** に渡して一括で `llm_explanation` と `user_advice` を生成する。
+  - **使用モデル**: Ollama `gemma3:4b` (優先) / フォールバック: `qwen3:4b`
+  - **バッチ戦略**: FAIL/WARN 項目を JSON 配列で1回のプロンプトに集約し、LLM 呼び出しは **Gate 5 全体で最大 1 回** に抑える。要求文が 15 件を超える場合は上位 15 件に切り詰める。
+  - **タイムアウト**: 30秒。超過時はテンプレートフォールバック (§7.3 参照)。
+  - **プロンプト構造**:
+    ```text
+    以下の助成金要件について、NPO団体の実績データとの適合度を分析してください。
+    各要件に対し、(1) 不適合の理由説明 (llm_explanation) と (2) ユーザーへの改善助言 (user_advice) を日本語で簡潔に返してください。
+    要件リスト: [{requirement, matched_evidence, similarity_score}, ...]
+    ```
+  - **出力パース**: JSON配列として返却を期待。パース失敗時はテンプレートフォールバック。
+- **Gate 5 全体のステータス判定ルール**:
+  - `FAIL` 項目が 1 つ以上 → Gate 5 全体 `FAIL`
+  - `FAIL` なし かつ `WARN` 項目が 1 つ以上 → Gate 5 全体 `WARN`
+  - 全項目 `PASS` → Gate 5 全体 `PASS`
 
 #### 【Gate 6: 書類網羅性 & 日付検証 (GATE_6_DOCUMENTS)】
 - **書類差分**: `missing_docs = grant.required_documents - npo.prepared_documents`
@@ -343,10 +375,22 @@ class EligibilityChecker:
 
 ## 7. エラーハンドリング・フォールバック・ログ仕様
 
-1. **DB未接続 / レコード不存在時**:
-   - `strict=True` の場合は即座に `ValueError` を送出。
-   - `strict=False` の場合は全検問を `WARN` とし、`overall_status = 'CONDITIONAL'`, `reason = 'DB未接続のため標準フォールバック判定'` を返却。
-2. **Embedding 生成モデル未ロード時**:
-   - 遅延ロード (`@property model`) で `BAAI/bge-m3` を自動ロード。ロード不可の場合はルールベースキーワード検索に自動フォールバック。
-3. **ローカルLLM未起動・タイムアウト時**:
-   - 確定引用＋事前定義テンプレートテキスト (`llm_explanation = 「【要件】... に対する十分な関連実績が団体データ内に確認できませんでした」`) に自動フォールバック。
+### 7.1 DB 接続障害
+- `strict=True` の場合は即座に `ValueError` を送出。
+- `strict=False` の場合は全検問を `WARN` とし、`overall_status = 'CONDITIONAL'`, `reason = 'DB未接続のため標準フォールバック判定'` を返却。
+
+### 7.2 Embedding モデル障害
+- 遅延ロード (`@property model`) で `BAAI/bge-m3` を自動ロード。
+- ロード不可の場合は Gate 4 をルールベースキーワード検索に自動フォールバック (フォールバックスコア: 75点 → 閾値は `0.55 * 100 = 55` 以上で PASS とみなす)。
+- Gate 5 では Embedding 不可時に Gate 全体を `WARN` + `reason = 'Embeddingモデル未ロード'` として処理続行。
+
+### 7.3 ローカル LLM 障害 (Gate 5 解説生成)
+- **モデル優先順位**: Ollama `gemma3:4b-it` → `qwen3:4b` → テンプレートフォールバック
+- **接続先**: `http://localhost:11434/api/generate` (Ollama API)
+- **タイムアウト**: 30秒 (接続: 5秒 / 推論: 25秒)
+- **フォールバックテンプレート**:
+  ```text
+  llm_explanation: 「公募要件『{requirement}』に対する十分な関連実績が団体データ内に確認できませんでした (類似度: {similarity_score:.2f})」
+  user_advice: 「該当する実績がある場合は、団体プロファイルの実績情報にテキストを追記して再判定してください」
+  ```
+- フォールバック発動時は `report_json` 内に `"llm_fallback": true` フラグを付与。
