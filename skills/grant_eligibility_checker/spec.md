@@ -1,155 +1,224 @@
-# スキル仕様書: 17項目要件適合チェッカー (check_eligibility.py)
+# スキル仕様書: 6段階動的検問ゲート適合チェッカー (check_eligibility.py)
 
 ## 1. 概要 & 目的
-登録団体のプロファイル情報 (`public.npo_profiles` / `public.npo_knowledge_chunks`) と助成金の公募要件 (`public.grants` / `public.knowledge_chunks`) を受け取り、全 17 項目にわたる 3 段階判定（確定ルール 5 項目 / 書類突合 4 項目 / pgvectorセマンティック評価 & ルール 8 項目）で適合スコア (0-100%) と未準備書類差分を自動算出・`public.alerts` に保存する CLI スクリプト。
+登録団体のプロファイル情報・書類 (`public.npo_profiles` / `public.npo_documents` / `public.npo_knowledge_chunks`) と助成金の公募要件 (`public.grants` / `public.knowledge_chunks`) を受け取り、**全 6 段階の動的検問ゲート (6-Stage Agentic Gate System)** で判定を行います。
 
-**特徴**:
-- **外部 LLM API 不使用・完全ローカル/DB完結**
-- **ハルシネーション 0%**: 全判定が確定ルール、集合演算、および `pgvector` コサイン類似度計算に基づく。
-- **確定引用**: 適合根拠テキスト (`evidence_quote`) は DB 内の `knowledge_chunks.content` から直接抽出。
+曖昧なスコア平均化を撤廃し、「1つでも必須要件を満たさなければ失格」とする実務審査フローを完全再現します。また、**PDFページ番号付き確証引用 (Page Citation Grounding)** と **ローカルLLMによる読み解き解説** により、ハルシネーション0%かつトレーサブルな判定結果を `public.alerts` に保存します。
 
 ---
 
-## 2. CLI インターフェース仕様
+## 2. データベース & ドキュメント保存アーキテクチャ
 
-```bash
-uv run skills/grant_eligibility_checker/scripts/check_eligibility.py \
-  --org-id "<npo_profile_uuid>" \
-  --grant-id "<grant_db_id_or_source_id>" \
-  [--json]
-```
-
-### 引数
-- `--org-id` (`str`, 必須): 判定対象の NPO 団体 UUID (`npo_profiles.id`)
-- `--grant-id` (`str`, 必須): 判定対象の助成金 DB ID (`grants.id` または `grants.source_grant_id`)
-- `--json` (`flag`, 任意): 結果を JSON フォーマットで標準出力
-
----
-
-## 3. テーブル前提仕様 (`public.npo_knowledge_chunks`)
-
-NPO 側のテキスト（活動分野・ターゲット層・団体概要）は、事前に `BAAI/bge-m3` (1024次元) でベクトル化され、以下のテーブルに格納されている前提とする：
-
-```sql
-CREATE TABLE IF NOT EXISTS public.npo_knowledge_chunks (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
-  chunk_type TEXT NOT NULL, -- 'ACTIVITY_TAGS', 'TARGET_AUDIENCE', 'DESCRIPTION'
-  content TEXT NOT NULL,
-  embedding vector(1024) NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  CONSTRAINT uq_npo_chunk_type UNIQUE (npo_profile_id, chunk_type)
-);
-
-CREATE INDEX IF NOT EXISTS idx_npo_knowledge_chunks_embedding_hnsw
-ON public.npo_knowledge_chunks USING hnsw (embedding vector_cosine_ops);
-```
-
----
-
-## 4. 判定ロジック詳細 (全 17 項目)
+### ① ドキュメント保存の 3 層レイヤー構造
 
 ```text
-skills/grant_eligibility_checker/scripts/check_eligibility.py
-├── EligibilityChecker (メインオーケストレーター)
-├── Stage1RuleEvaluator (確定ルール 5項目判定)
-├── Stage2DocumentMatcher (必要書類 4項目 集合差分判定)
-└── Stage3SemanticEvaluator (定性 8項目 pgvectorコサイン類似度 & ルール判定)
+[ユーザーが書類をアップロード / ローカル配置]
+                     │
+                     ▼
+ ┌────────────────────────────────────────────────────────┐
+ │ Layer 1: 実ファイル保存 (ストレージ)                    │
+ │  パス: storage/npo_documents/<npo_id>/<doc_type>/... │
+ └───────────────────┬────────────────────────────────────┘
+                     │
+                     ▼ 【自動テキストパース & メタデータ登録】
+ ┌────────────────────────────────────────────────────────┐
+ │ Layer 2: DB メタデータ管理 (public.npo_documents)     │
+ │  ・書類種別, ファイル名, パス, 発行年月日, 有効期限       │
+ └───────────────────┬────────────────────────────────────┘
+                     │
+                     ▼ 【BAAI/bge-m3 ベクトル化】
+ ┌────────────────────────────────────────────────────────┐
+ │ Layer 3: RAG知識ベース (public.npo_knowledge_chunks)   │
+ │  ・テキスト文章 + BGE-M3 ベクトル(1024)                 │
+ └────────────────────────────────────────────────────────┘
 ```
 
-### ① Stage 1: 確定ルール判定 (5 項目)
-DB カラム同士を直接比較。不合格項目がある場合、全体の総合適合ステータスは `FAIL` となる。
+#### Layer 1: ディレクトリ構造
+```text
+storage/npo_documents/
+└── <npo_profile_id>/
+    ├── ARTICLES/                     # 定款・規約
+    ├── FINANCIAL_REPORT/             # 決算書・財務諸表
+    ├── ACTIVITY_REPORT/              # 事業報告書・実績テキスト
+    ├── BOARD_LIST/                   # 役員・構成員名簿
+    └── REGISTRY_CERTIFICATE/         # 履歴事項全部証明書・登記簿
+```
 
-1. **organization_type**: `npo_profiles.organization_type IN grants.eligible_org_types`
-2. **years_active**: `(現在の年 - establishment_year) >= min_years_active` (設立年未設定の場合は `0` 年扱い)
-3. **target_area**: `grant_area == '全国'` OR `npo_loc == '全国'` OR 部分一致 (`grant_area in npo_loc` / `npo_loc in grant_area`)
-4. **budget_ratio**: `grants.amount_max <= npo_profiles.annual_budget * 0.50` (助成上限が年予算の 50% 以内なら適正)
-5. **grant_status**: `grants.status == 'OPEN'` かつ `grants.deadline >= 現在日`
-
-### ② Stage 2: 書類自動突合判定 (4 項目)
-`grants.required_documents` と `npo_profiles.prepared_documents` を比較。
-- 差分集合 `missing_docs = required_documents - prepared_documents` を抽出。
-- スコア: `(一致数 / 必要数) * 100`（`required_documents` が明示的空配列の場合は 100点）。
-
-### ③ Stage 3: pgvector セマンティック評価 & 定性判定 (8 項目)
-
-| # | 項目キー | 判定ロジック | スコア算出・根拠 |
-|---|---------|-------------|----------------|
-| 10 | `activity_category` | NPO `chunk_type='ACTIVITY_TAGS'` のベクトルと `knowledge_chunks` の **pgvector コサイン類似度** | 類似度 (0.0~1.0) × 100。最類似チャンクテキストを `quote` に付与 |
-| 11 | `target_audience` | NPO `chunk_type='TARGET_AUDIENCE'` のベクトルと `knowledge_chunks` の **pgvector コサイン類似度** | 類似度 (0.0~1.0) × 100。最類似チャンクテキストを `quote` に付与 |
-| 12 | `purpose_match` | NPO `chunk_type='DESCRIPTION'` のベクトルと `knowledge_chunks` の **pgvector コサイン類似度** | 類似度 (0.0~1.0) × 100。最類似チャンクテキストを `quote` に付与 |
-| 13 | `partnership_req` | `detail_text` 内のキーワード検出 (「連携」「協働」「パートナー」「地域住民」等) | キーワード検出時: 90点 / 未検出時: 75点 |
-| 14 | `uniqueness_req` | `detail_text` 内のキーワード検出 (「新規」「先進」「モデル」「革新」等) | キーワード検出時: 90点 / 未検出時: 80点 |
-| 15 | `cost_burden` | `grants.is_rate_10_10` フラグ参照 | `TRUE` (10/10 100%補助): 100点 / `FALSE`: 80点 |
-| 16 | `advance_payment` | `grants.is_advance_payment` フラグ参照 | `TRUE` (概算払い可): 100点 / `FALSE`: 75点 |
-| 17 | `compliance` | `detail_text` 内の暴力団・反社排除条項テキスト確認 | 規定あり: 100点 |
-
-#### 🛡️ Substring Match Guard (完全確定引用)
-- 項目 10〜12 で取得された `knowledge_chunks.content` の最類似フレーズを `evidence_quote` として採用。
-- DB 内のテキストそのものを抽出するため、ハルシネーション率は **0%** が完全保証される。
+#### Layer 2: `public.npo_documents` (書類メタデータテーブル)
+```sql
+CREATE TABLE IF NOT EXISTS public.npo_documents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  npo_profile_id UUID NOT NULL REFERENCES public.npo_profiles(id) ON DELETE CASCADE,
+  doc_type TEXT NOT NULL, -- 'ARTICLES', 'FINANCIAL_REPORT', 'REGISTRY_CERTIFICATE' etc.
+  file_name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  issued_date DATE,        -- 発行年月日 (登記簿の3ヶ月以内チェック等で使用)
+  is_verified BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
 
 ---
 
-## 5. 判定結果データ構造 (Output Schema)
+### ② データベース ER 図 (PostgreSQL / Neon / pgvector)
+
+```mermaid
+erDiagram
+    npo_profiles ||--o{ npo_documents : "1:N (実ファイルメタデータ)"
+    npo_profiles ||--o{ npo_knowledge_chunks : "1:N (ベクトル化)"
+    grants ||--o{ knowledge_chunks : "1:N (PDFページ付ベクトル化)"
+    npo_profiles ||--o{ alerts : "1:N (判定通知)"
+    grants ||--o{ alerts : "1:N (判定結果)"
+
+    npo_profiles {
+        uuid id PK
+        string name "団体名"
+        string organization_type "法人種別 (NPO/一般社団等)"
+        int establishment_year "設立年"
+        bigint annual_budget "前年事業予算"
+        string headquarter_location "主たる事務所 (本店所在地)"
+        string_array branch_locations "従たる事務所 (支店・営業所)"
+        string_array activity_areas "事業実施地域 (活動エリア)"
+        string_array prepared_documents "準備済み提出書類リスト"
+    }
+
+    npo_documents {
+        uuid id PK
+        uuid npo_profile_id FK
+        string doc_type "ARTICLES | FINANCIAL | REGISTRY etc."
+        string file_name "ファイル名"
+        string file_path "ストレージ保存パス"
+        date issued_date "発行年月日"
+    }
+
+    npo_knowledge_chunks {
+        uuid id PK
+        uuid npo_profile_id FK
+        string chunk_type "TRACK_RECORDS | QUALIFICATIONS | ARTICLES etc."
+        text content "実績・資格・定款・事業内容の原文テキスト"
+        vector_1024 embedding "BAAI/bge-m3 ベクトル表現"
+    }
+
+    grants {
+        int id PK
+        string title "助成金・補助金名称"
+        string provider "主催団体 / 官公庁"
+        bigint amount_max "助成上限額"
+        date deadline "公募締切日"
+        string target_area "対象地域 (都道府県/全国)"
+        string location_requirement_type "HEADQUARTER_ONLY | BRANCH_ALLOWED | ACTIVITY_AREA_ONLY"
+        string_array requirement_sentences "公募要領から抽出した特定要求文リスト"
+        string status "OPEN / CLOSED"
+    }
+
+    knowledge_chunks {
+        uuid id PK
+        int grant_id FK
+        string chunk_type "EVALUATION | INTENT | REQUIREMENT"
+        text content "公募要領の本文テキスト"
+        int page_number "PDF内の発生ページ番号 (1〜N)"
+        vector_1024 embedding "BAAI/bge-m3 ベクトル表現"
+    }
+
+    alerts {
+        bigint id PK
+        uuid npo_profile_id FK
+        int grant_id FK
+        string overall_status "ELIGIBLE(適合) | CONDITIONAL(要確認) | INELIGIBLE(不適合)"
+        jsonb report_json "全6検問結果・引用・ページ数・LLM解説の完全ログ"
+        string_array failed_gate_codes "不合格となった検問コードのリスト"
+        timestamptz created_at "判定実行日時"
+    }
+```
+
+---
+
+## 3. 6 段階動的検問ゲート仕様 (6-Stage Agentic Gate System)
+
+```text
+[公募助成金] ──► [検問1: 基本要件 (法人型・年数・期限)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
+                 │ PASS (SQL確定的チェック)
+                 ▼
+                [検問2: 拠点要件 (本店/支店/活動地)] ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
+                 │ PASS (多重拠点ロジカル検証)
+                 ▼
+                [検問3: 予算規模 (上限比率50%制限)]  ──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
+                 │ PASS (数値計算)
+                 ▼
+                [検問4: 分野適合セマンティックゲート]──► FAIL ➔ 🔴 不適合 (INELIGIBLE)
+                 │ PASS (目的・対象類似度 >= 0.45)
+                 ▼
+                [検問5: 特定要件動的 RAG 検索]       ──► FAIL ➔ 🔴 不適合 / WARN ➔ 🟡 条件付き適合
+                 │ (要求文分解 ➔ RAGベクトル検索 ➔ ページ番号引用 ➔ ローカルLLM読み解き)
+                 ▼
+                [検問6: 提出書類準備率チェック]     ──► WARN ➔ 🟡 要書類手配
+                 │ (集合差分判定)
+                 ▼
+                🟢 完全適合 (ELIGIBLE: 全検問をクリア)
+```
+
+---
+
+## 4. 判定レポート出力フォーマット (Report Output Schema)
 
 ```json
 {
-  "grant_id": 123,
-  "grant_title": "令和8年度 地域コミュニティ活性化助成金",
+  "grant_id": 2,
+  "grant_title": "東京都若者世代職場定着促進助成金（令和８年度第４回申請受付）",
   "npo_profile_id": "uuid-1234-5678",
-  "npo_name": "特定非営利活動法人 まちづくりサポート",
-  "match_score": 88,
-  "status": "PASS",
-  "stage1_results": {
-    "all_pass": true,
-    "details": {
-      "organization_type": {"pass": true, "reason": "団体型 'NPO_CORPORATION' は対象枠 ['NPO_CORPORATION', 'GENERAL_INC'] に含まれます"},
-      "years_active": {"pass": true, "reason": "活動実績 5年 (必要年数: 1年)"},
-      "target_area": {"pass": true, "reason": "公募エリア '全国' vs 団体拠点 '東京都'"},
-      "budget_ratio": {"pass": true, "reason": "助成上限 2,000,000円 / 前年予算 10,000,000円 (比率: 20.0% <= 50%上限)"},
-      "grant_status": {"pass": true, "reason": "ステータス 'OPEN' / 締切 '2026-09-30'"}
-    }
-  },
-  "stage2_results": {
-    "score": 75,
-    "required": ["ARTICLES", "BOARD_LIST", "FINANCIAL_REPORT", "REGISTRY_CERTIFICATE"],
-    "prepared": ["ARTICLES", "BOARD_LIST", "FINANCIAL_REPORT"],
-    "missing": ["REGISTRY_CERTIFICATE"]
-  },
-  "stage3_results": {
-    "score": 86,
-    "criteria_scores": {
-      "activity_category": 92,
-      "target_audience": 88,
-      "purpose_match": 85,
-      "partnership_req": 90,
-      "uniqueness_req": 80,
-      "cost_burden": 100,
-      "advance_payment": 75,
-      "compliance": 100
+  "npo_name": "特定非営利活動法人 Open Coral Network",
+  "overall_status": "CONDITIONAL",
+  "passed_gates": 5,
+  "total_gates": 6,
+  "gates": [
+    {
+      "gate_code": "GATE_1_BASIC_RULES",
+      "gate_name": "検問1: 基本要件",
+      "status": "PASS",
+      "reason": "法人型 'NPO_CORPORATION' / 活動年数 1年 / 公募期限内"
     },
-    "evidence_quotes": [
-      "地域のデジタル化を推進し、高齢者および過疎地域の住民を支援対象とする事業を助成します。"
-    ]
-  },
-  "evaluated_at": "2026-07-31T22:45:00.000000"
+    {
+      "gate_code": "GATE_2_LOCATION",
+      "gate_name": "検問2: 拠点要件",
+      "status": "PASS",
+      "reason": "公募エリア '東京都' (支店認容要件) vs 支店拠点 '東京都千代田区'"
+    },
+    {
+      "gate_code": "GATE_3_BUDGET",
+      "gate_name": "検問3: 予算規模",
+      "status": "PASS",
+      "reason": "助成上限 1,260,000円 / 前年予算 10,000,000円 (12.6% <= 50%上限)"
+    },
+    {
+      "gate_code": "GATE_4_SEMANTIC_OVERALL",
+      "gate_name": "検問4: 大枠分野適合",
+      "status": "PASS",
+      "reason": "目的・対象層コサイン類似度: 0.52 (基準値 0.45 以上クリア)"
+    },
+    {
+      "gate_code": "GATE_5_SPECIFIC_RAG_REQUIREMENTS",
+      "gate_name": "検問5: 特定要件動的 RAG 検索",
+      "status": "WARN",
+      "items": [
+        {
+          "grant_requirement": "都が実施する就職支援事業の利用者を正規雇用していること",
+          "page_number": 3,
+          "citation_url": "file:///path/to/grant_guide.pdf#page=3",
+          "npo_matched_evidence": "地域NPOと連携し子ども向けプログラミング教育を実施",
+          "similarity_score": 0.32,
+          "status": "FAIL",
+          "llm_explanation": "公募要件は『都の就職支援事業を利用した若者の雇用実績』を求めていますが、貴団体のプロファイルにはプログラミング教育の実績のみで、該当する雇用記録が確認できません。",
+          "user_advice": "※過去に該当する雇用実績がある場合は、団体プロファイルの「実績情報」にテキストを追記して再判定してください。"
+        }
+      ]
+    },
+    {
+      "gate_code": "GATE_6_DOCUMENTS",
+      "gate_name": "検問6: 提出書類準備率",
+      "status": "PASS",
+      "reason": "必要書類 0件 未準備"
+    }
+  ],
+  "evaluated_at": "2026-08-02T18:20:00Z"
 }
-```
-
----
-
-## 6. DB 保存処理 (public.alerts)
-
-判定完了後、Neon DB の `public.alerts` に PostgreSQL `ON CONFLICT` で保存・更新：
-
-```sql
-INSERT INTO public.alerts (npo_profile_id, grant_id, alert_type, title, message, match_score, is_read)
-VALUES (%s, %s, 'ELIGIBILITY_MATCH', %s, %s, %s, false)
-ON CONFLICT (npo_profile_id, grant_id, alert_type)
-DO UPDATE SET
-    title = EXCLUDED.title,
-    message = EXCLUDED.message,
-    match_score = EXCLUDED.match_score,
-    is_read = false,
-    created_at = NOW();
 ```
