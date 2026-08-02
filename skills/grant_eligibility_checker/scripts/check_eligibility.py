@@ -61,11 +61,34 @@ class Stage1RuleEvaluator:
 
         # 3. 対象地域 (target_area)
         grant_area = grant.get("target_area") or "全国"
-        npo_loc = npo.get("location") or "全国"
-        area_pass = (grant_area == "全国") or (npo_loc == "全国") or (grant_area in npo_loc) or (npo_loc in grant_area)
+        req_type = grant.get("location_requirement_type") or "BRANCH_ALLOWED"
+
+        hq_loc = npo.get("headquarter_location") or ""
+        branches = npo.get("branch_locations") or []
+        activities = npo.get("activity_areas") or []
+        legacy_loc = npo.get("location") or "全国"
+
+        if grant_area == "全国":
+            area_pass = True
+            reason = f"公募エリア '{grant_area}' (全国開放枠)"
+        elif req_type == "HEADQUARTER_ONLY":
+            check_target = hq_loc or legacy_loc
+            area_pass = (grant_area in check_target) or (check_target in grant_area) or ("全国" in check_target)
+            reason = f"公募エリア '{grant_area}' (本店限定要件) vs 本店拠点 '{check_target}'"
+        elif req_type == "ACTIVITY_AREA_ONLY":
+            check_list = activities or ([legacy_loc] if legacy_loc else [])
+            area_pass = any(grant_area in a or a in grant_area or "全国" in a for a in check_list)
+            reason = f"公募エリア '{grant_area}' (事業実施地要件) vs 活動地域 {check_list}"
+        else:  # BRANCH_ALLOWED (デフォルト)
+            check_list = ([hq_loc] if hq_loc else []) + list(branches)
+            if not check_list and legacy_loc:
+                check_list = [legacy_loc]
+            area_pass = any(grant_area in c or c in grant_area or "全国" in c for c in check_list)
+            reason = f"公募エリア '{grant_area}' (支店認容要件) vs 本店・支店拠点 {check_list}"
+
         results["target_area"] = {
             "pass": area_pass,
-            "reason": f"公募エリア '{grant_area}' vs 団体拠点 '{npo_loc}'"
+            "reason": reason
         }
         if not area_pass:
             all_pass = False

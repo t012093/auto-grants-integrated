@@ -142,12 +142,31 @@ class PDFExtractor:
 
         return rules
 
+    def extract_location_requirement_deterministic(self, text: str) -> str:
+        """
+        公募要領テキストから所在地要件タイプ (location_requirement_type) を決定論的にパース
+        - HEADQUARTER_ONLY: 主たる事務所 / 登記地 限定
+        - ACTIVITY_AREA_ONLY: 事業実施場所 / 活動地域 限定
+        - BRANCH_ALLOWED: 支店 / 営業所も対象 (デフォルト)
+        """
+        flat_text = text.replace("\n", " ")
+        hq_pattern = r"(主たる事務所|登記簿|本社所在地|登記地).*?(に限る|必須|対象とする|のみ)"
+        if re.search(hq_pattern, flat_text):
+            return "HEADQUARTER_ONLY"
+
+        act_pattern = r"(事業実施場所|活動エリア|現地|現場).*?(のみ|を実施すること|で事業を行う)"
+        if re.search(act_pattern, flat_text) and not re.search(r"(主たる事務所|拠点|支店)", flat_text):
+            return "ACTIVITY_AREA_ONLY"
+
+        return "BRANCH_ALLOWED"
+
     def extract_structured_requirements(self, text: str) -> Dict[str, Any]:
         """
         公募要領テキストから 5 大要件を抽出（確定的パース + Substring Guard 構造）
         """
         req_docs = self.extract_required_documents_deterministic(text)
         expense_rules = self.extract_expense_rules_deterministic(text)
+        loc_req_type = self.extract_location_requirement_deterministic(text)
 
         criteria_snippet = None
         criteria_match = re.search(r"(審査基準|評価項目|選定基準|評価のポイント)[\s\S]{1,500}", text)
@@ -170,6 +189,7 @@ class PDFExtractor:
             "project_period": period_str,
             "expense_rules": expense_rules,
             "required_documents": req_docs,
+            "location_requirement_type": loc_req_type,
             "extraction_coverage": {
                 "evaluation_criteria": criteria_snippet is not None,
                 "funder_intent": intent_snippet is not None,
@@ -267,11 +287,12 @@ class PDFExtractor:
                     UPDATE public.grants
                     SET detail_text = %s,
                         required_documents = %s,
+                        location_requirement_type = %s,
                         is_ocr_processed = true,
                         updated_at = NOW()
                     WHERE id = %s;
                     """,
-                    (updated_detail, reqs["required_documents"], grant_id)
+                    (updated_detail, reqs["required_documents"], reqs["location_requirement_type"], grant_id)
                 )
 
                 # 2. public.grant_expense_rules の更新
