@@ -35,8 +35,8 @@ CREATE TABLE IF NOT EXISTS public.grant_proposals (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_proposals_npo ON public.grant_proposals(npo_id);
-CREATE INDEX idx_proposals_status ON public.grant_proposals(status);
+CREATE INDEX IF NOT EXISTS idx_proposals_npo ON public.grant_proposals(npo_id);
+CREATE INDEX IF NOT EXISTS idx_proposals_status ON public.grant_proposals(status);
 
 CREATE TRIGGER set_grant_proposals_updated_at
 BEFORE UPDATE ON public.grant_proposals
@@ -61,8 +61,8 @@ CREATE TABLE IF NOT EXISTS public.proposal_grant_mappings (
     CONSTRAINT uq_proposal_grant UNIQUE (proposal_id, grant_id)
 );
 
-CREATE INDEX idx_proposal_grant_map_proposal ON public.proposal_grant_mappings(proposal_id);
-CREATE INDEX idx_proposal_grant_map_grant ON public.proposal_grant_mappings(grant_id);
+CREATE INDEX IF NOT EXISTS idx_proposal_grant_map_proposal ON public.proposal_grant_mappings(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_proposal_grant_map_grant ON public.proposal_grant_mappings(grant_id);
 
 -- ---------------------------------------------------------------------------
 -- 3. プロジェクトオファー & ポジション管理
@@ -86,8 +86,8 @@ CREATE TABLE IF NOT EXISTS public.proposal_project_offers (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_offers_proposal ON public.proposal_project_offers(proposal_id);
-CREATE INDEX idx_offers_status ON public.proposal_project_offers(status);
+CREATE INDEX IF NOT EXISTS idx_offers_proposal ON public.proposal_project_offers(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_offers_status ON public.proposal_project_offers(status);
 
 -- ---------------------------------------------------------------------------
 -- 4. メンバー先着エントリー管理
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS public.proposal_offer_entries (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_entries_offer ON public.proposal_offer_entries(offer_id);
+CREATE INDEX IF NOT EXISTS idx_entries_offer ON public.proposal_offer_entries(offer_id);
 
 -- ---------------------------------------------------------------------------
 -- 5. 窓口コミュニケーション履歴 (アフターフォロー対応)
@@ -125,8 +125,8 @@ CREATE TABLE IF NOT EXISTS public.proposal_communications (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_comms_proposal ON public.proposal_communications(proposal_id);
-CREATE INDEX idx_comms_next_action ON public.proposal_communications(next_action_date)
+CREATE INDEX IF NOT EXISTS idx_comms_proposal ON public.proposal_communications(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_comms_next_action ON public.proposal_communications(next_action_date)
     WHERE next_action_date IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
@@ -149,8 +149,8 @@ CREATE TABLE IF NOT EXISTS public.proposal_resource_allocations (
     CONSTRAINT chk_resource_date_range CHECK (start_date <= end_date)
 );
 
-CREATE INDEX idx_resource_alloc_proposal ON public.proposal_resource_allocations(proposal_id);
-CREATE INDEX idx_resource_alloc_identifier ON public.proposal_resource_allocations(resource_identifier);
+CREATE INDEX IF NOT EXISTS idx_resource_alloc_proposal ON public.proposal_resource_allocations(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_resource_alloc_identifier ON public.proposal_resource_allocations(resource_identifier);
 
 -- ---------------------------------------------------------------------------
 -- 7. 監査エビデンス一括保管テーブル
@@ -171,8 +171,8 @@ CREATE TABLE IF NOT EXISTS public.proposal_audit_evidences (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_audit_proposal ON public.proposal_audit_evidences(proposal_id);
-CREATE INDEX idx_audit_type ON public.proposal_audit_evidences(evidence_type);
+CREATE INDEX IF NOT EXISTS idx_audit_proposal ON public.proposal_audit_evidences(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_audit_type ON public.proposal_audit_evidences(evidence_type);
 
 -- ---------------------------------------------------------------------------
 -- 8. 不採択分析 & ピボット再利用管理テーブル
@@ -192,4 +192,31 @@ CREATE TABLE IF NOT EXISTS public.proposal_reviews_and_retries (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_reviews_proposal ON public.proposal_reviews_and_retries(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_proposal ON public.proposal_reviews_and_retries(proposal_id);
+
+-- ---------------------------------------------------------------------------
+-- 9. RLS (Row Level Security) ENABLE
+-- ---------------------------------------------------------------------------
+ALTER TABLE public.grant_proposals ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+ALTER TABLE public.proposal_grant_mappings ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+ALTER TABLE public.proposal_project_offers ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+ALTER TABLE public.proposal_offer_entries ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+ALTER TABLE public.proposal_communications ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+ALTER TABLE public.proposal_resource_allocations ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+ALTER TABLE public.proposal_audit_evidences ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+ALTER TABLE public.proposal_reviews_and_retries ENABLE ROW LEVEL SECURITY;
+-- TODO: org_id カラムが存在しないため、ポリシーは別途定義
