@@ -119,7 +119,8 @@ class Gate1BasicRuleEvaluator:
                 try:
                     deadline = datetime.strptime(deadline[:10], "%Y-%m-%d").date()
                 except ValueError:
-                    deadline_valid = True
+                    # パース失敗時は安全側に倒して無効(False)とする
+                    deadline_valid = False
             elif isinstance(deadline, datetime):
                 deadline = deadline.date()
             if isinstance(deadline, date):
