@@ -303,7 +303,7 @@ async def run_collector(
             res = await session.fetch(target_url)
             if res.status == "ok":
                 html_content = res.html
-    except (TimeoutError, ConnectionError, ImportError, OSError) as e:
+    except (TimeoutError, ConnectionError, RuntimeError, ImportError, OSError) as e:
         logger.warning(f"CrawlerSession fetch failed for {target_url}: {e}. Falling back to httpx.")
         import httpx
         async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:

@@ -14,8 +14,8 @@ usage:
 import os
 import argparse
 import psycopg2
+from psycopg2 import sql
 import numpy as np
-import json
 
 # 対象とするテーブルのリストと、その主キーのカラム名
 # プロジェクト内のマイグレーションファイルから vector(1024) を持つテーブルを抽出
@@ -29,19 +29,33 @@ def get_db_connection():
     db_url = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
     if not db_url:
         raise ValueError("環境変数 SUPABASE_DB_URL または DATABASE_URL が設定されていません。")
-    return psycopg2.connect(db_url)
+    conn = psycopg2.connect(db_url)
+    # pgvector アダプタ登録（利用可能な場合）
+    try:
+        from pgvector.psycopg2 import register_vector
+        register_vector(conn)
+    except ImportError:
+        pass  # pgvector パッケージ未インストール時は手動パースにフォールバック
+    return conn
 
 def migrate_table(conn, table_name, pk_col, dry_run=False, batch_size=100):
     print(f"\n--- 処理開始: テーブル '{table_name}' ---")
-    
+
+    tbl = sql.Identifier("public", table_name)
+    pk = sql.Identifier(pk_col)
+    emb = sql.Identifier("embedding")
+
     with conn.cursor() as cur:
         # テーブルの存在とカラムの存在を確認
-        cur.execute(f"SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = '{table_name}' AND column_name = 'embedding');")
+        cur.execute(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = 'embedding');",
+            (table_name,)
+        )
         if not cur.fetchone()[0]:
             print(f"スキップ: テーブル '{table_name}' に 'embedding' カラムが見つかりません。")
             return
 
-        cur.execute(f"SELECT COUNT(*) FROM public.{table_name} WHERE embedding IS NOT NULL;")
+        cur.execute(sql.SQL("SELECT COUNT(*) FROM {} WHERE {} IS NOT NULL;").format(tbl, emb))
         total_rows = cur.fetchone()[0]
         print(f"対象レコード数 (embedding IS NOT NULL): {total_rows} 件")
 
@@ -53,44 +67,54 @@ def migrate_table(conn, table_name, pk_col, dry_run=False, batch_size=100):
 
         while offset < total_rows:
             # ページネーションで取得
-            cur.execute(f"SELECT {pk_col}, embedding FROM public.{table_name} WHERE embedding IS NOT NULL ORDER BY {pk_col} LIMIT {batch_size} OFFSET {offset};")
+            cur.execute(
+                sql.SQL("SELECT {pk}, {emb} FROM {tbl} WHERE {emb} IS NOT NULL ORDER BY {pk} LIMIT %s OFFSET %s;").format(
+                    pk=pk, emb=emb, tbl=tbl
+                ),
+                (batch_size, offset)
+            )
             rows = cur.fetchall()
             if not rows:
                 break
-            
+
             for row in rows:
-                pk_val, embedding_str = row
-                
-                # PostgreSQL の vector 型をリストに変換
-                if isinstance(embedding_str, str):
-                    try:
-                        embedding_list = json.loads(embedding_str)
-                    except json.JSONDecodeError:
-                        embedding_list = [float(x) for x in embedding_str.strip('[]').split(',')]
+                pk_val, embedding_data = row
+
+                # pgvector アダプタ登録済みなら numpy 配列で取得される
+                if isinstance(embedding_data, np.ndarray):
+                    vec = embedding_data.astype(float)
+                elif isinstance(embedding_data, (list, tuple)):
+                    vec = np.array(embedding_data, dtype=float)
+                elif isinstance(embedding_data, str):
+                    # pgvector 形式 "[0.1,0.2,...]" の手動パース
+                    vec = np.array(
+                        [float(x) for x in embedding_data.strip('[]').split(',')],
+                        dtype=float
+                    )
                 else:
-                    embedding_list = embedding_str
-                
-                vec = np.array(embedding_list, dtype=float)
+                    continue
+
                 norm = np.linalg.norm(vec)
-                
+
                 # すでに正規化されているかチェック (許容誤差 atol=1e-5)
                 if not np.isclose(norm, 1.0, atol=1e-5) and norm > 0:
                     normalized_vec = vec / norm
                     updated_count += 1
-                    
+
                     if not dry_run:
-                        # numpy配列をリストに変換して更新
                         cur.execute(
-                            f"UPDATE public.{table_name} SET embedding = %s WHERE {pk_col} = %s;",
+                            sql.SQL("UPDATE {tbl} SET {emb} = %s WHERE {pk} = %s;").format(
+                                tbl=tbl, emb=emb, pk=pk
+                            ),
                             (normalized_vec.tolist(), pk_val)
                         )
-                        
+
             offset += batch_size
-            print(f"進捗: {min(offset, total_rows)} / {total_rows} 処理完了 (更新件数: {updated_count})")
-            
+            print(f"進捗: {min(offset, total_rows)} / {total_rows} 処理完了 (更新件数: {updated_count}, 最終offset: {offset})")
+
             if not dry_run:
                 conn.commit()
-                
+
     print(f"--- 処理完了: テーブル '{table_name}' (総更新件数: {updated_count} / {total_rows}) ---")
 
 def main():

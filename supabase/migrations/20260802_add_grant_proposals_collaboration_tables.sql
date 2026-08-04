@@ -195,28 +195,134 @@ CREATE TABLE IF NOT EXISTS public.proposal_reviews_and_retries (
 CREATE INDEX IF NOT EXISTS idx_reviews_proposal ON public.proposal_reviews_and_retries(proposal_id);
 
 -- ---------------------------------------------------------------------------
--- 9. RLS (Row Level Security) ENABLE
+-- 9. RLS (Row Level Security) ENABLE + ポリシー定義
+--    アクセス経路: テーブル → grant_proposals.npo_id → npo_profiles.owner_user_id = auth.uid()
 -- ---------------------------------------------------------------------------
+
+-- ── grant_proposals (ルートテーブル: npo_id で直接判定) ──
 ALTER TABLE public.grant_proposals ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
 
+CREATE POLICY proposals_owner_select ON public.grant_proposals FOR SELECT USING (
+    npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+);
+CREATE POLICY proposals_owner_insert ON public.grant_proposals FOR INSERT WITH CHECK (
+    npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+);
+CREATE POLICY proposals_owner_update ON public.grant_proposals FOR UPDATE USING (
+    npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+);
+CREATE POLICY proposals_owner_delete ON public.grant_proposals FOR DELETE USING (
+    npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
+);
+
+-- ── proposal_grant_mappings (proposal_id 経由) ──
 ALTER TABLE public.proposal_grant_mappings ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
 
+CREATE POLICY pgm_owner_select ON public.proposal_grant_mappings FOR SELECT USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY pgm_owner_insert ON public.proposal_grant_mappings FOR INSERT WITH CHECK (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY pgm_owner_update ON public.proposal_grant_mappings FOR UPDATE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY pgm_owner_delete ON public.proposal_grant_mappings FOR DELETE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+
+-- ── proposal_project_offers (proposal_id 経由) ──
 ALTER TABLE public.proposal_project_offers ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
 
+CREATE POLICY offers_owner_select ON public.proposal_project_offers FOR SELECT USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY offers_owner_insert ON public.proposal_project_offers FOR INSERT WITH CHECK (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY offers_owner_update ON public.proposal_project_offers FOR UPDATE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY offers_owner_delete ON public.proposal_project_offers FOR DELETE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+
+-- ── proposal_offer_entries (offer_id → proposal_project_offers → grant_proposals 経由) ──
 ALTER TABLE public.proposal_offer_entries ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
 
+CREATE POLICY entries_owner_select ON public.proposal_offer_entries FOR SELECT USING (
+    offer_id IN (SELECT id FROM public.proposal_project_offers WHERE proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())))
+);
+CREATE POLICY entries_owner_insert ON public.proposal_offer_entries FOR INSERT WITH CHECK (
+    offer_id IN (SELECT id FROM public.proposal_project_offers WHERE proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())))
+);
+CREATE POLICY entries_owner_update ON public.proposal_offer_entries FOR UPDATE USING (
+    offer_id IN (SELECT id FROM public.proposal_project_offers WHERE proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())))
+);
+CREATE POLICY entries_owner_delete ON public.proposal_offer_entries FOR DELETE USING (
+    offer_id IN (SELECT id FROM public.proposal_project_offers WHERE proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())))
+);
+
+-- ── proposal_communications (proposal_id 経由) ──
 ALTER TABLE public.proposal_communications ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
 
+CREATE POLICY comms_owner_select ON public.proposal_communications FOR SELECT USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY comms_owner_insert ON public.proposal_communications FOR INSERT WITH CHECK (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY comms_owner_update ON public.proposal_communications FOR UPDATE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY comms_owner_delete ON public.proposal_communications FOR DELETE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+
+-- ── proposal_resource_allocations (proposal_id 経由) ──
 ALTER TABLE public.proposal_resource_allocations ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
 
+CREATE POLICY resource_alloc_owner_select ON public.proposal_resource_allocations FOR SELECT USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY resource_alloc_owner_insert ON public.proposal_resource_allocations FOR INSERT WITH CHECK (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY resource_alloc_owner_update ON public.proposal_resource_allocations FOR UPDATE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY resource_alloc_owner_delete ON public.proposal_resource_allocations FOR DELETE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+
+-- ── proposal_audit_evidences (proposal_id 経由) ──
 ALTER TABLE public.proposal_audit_evidences ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
 
+CREATE POLICY audit_owner_select ON public.proposal_audit_evidences FOR SELECT USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY audit_owner_insert ON public.proposal_audit_evidences FOR INSERT WITH CHECK (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY audit_owner_update ON public.proposal_audit_evidences FOR UPDATE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY audit_owner_delete ON public.proposal_audit_evidences FOR DELETE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+
+-- ── proposal_reviews_and_retries (proposal_id 経由) ──
 ALTER TABLE public.proposal_reviews_and_retries ENABLE ROW LEVEL SECURITY;
--- TODO: org_id カラムが存在しないため、ポリシーは別途定義
+
+CREATE POLICY reviews_owner_select ON public.proposal_reviews_and_retries FOR SELECT USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY reviews_owner_insert ON public.proposal_reviews_and_retries FOR INSERT WITH CHECK (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY reviews_owner_update ON public.proposal_reviews_and_retries FOR UPDATE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
+CREATE POLICY reviews_owner_delete ON public.proposal_reviews_and_retries FOR DELETE USING (
+    proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
+);
