@@ -44,6 +44,7 @@ uv.lock
 data/pdfs/
 artifacts_*.json
 grants_national_*.json
+grants_national_*.csv
 grants_national_*.xlsx
 grants_national_*.docx
 report.md
