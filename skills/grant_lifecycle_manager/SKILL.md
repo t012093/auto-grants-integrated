@@ -70,6 +70,10 @@ uv run skills/grant_lifecycle_manager/scripts/export_calendar_ics.py \
 
 ## 実効的 8 軸採択予測モデル (SOP)
 
+> **📋 設計正本**: [spec.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_lifecycle_manager/spec.md)（ブラッシュアップ版）
+> **重要**: 本モジュールは「採択勝率（絶対確率）」ではなく**「相対競争順位（rank）+ 軸別スコア + coverage（評価充足度）」**を出力する。
+> 採択データが少ない現状で絶対確率を出さない（`scoring_redesign_plan §M`・spec §2-原則1）。
+
 ### 8 大評価軸
 
 | # | 評価軸 | 判定に使用するデータ |
@@ -114,6 +118,9 @@ uv run skills/grant_lifecycle_manager/scripts/export_calendar_ics.py \
 
 ## 関連ドキュメント
 
+* 📋 **仕様正本（ブラッシュアップ版）**: [spec.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_lifecycle_manager/spec.md)（rank・coverage・既存再利用・企画書フィードバック・学習）
 * 📘 [grant_pipeline_spec.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/docs/grant_pipeline_spec.md) (パイプライン統合仕様 §9, §10)
+* 📘 [scoring_redesign_plan.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/docs/scoring_redesign_plan.md) (§F: gate/rank 役割境界, §M: キャリブレーション限界)
 * ✅ [grant_eligibility_checker SKILL.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_eligibility_checker/SKILL.md) (17項目適合判定の上流)
+* 🔄 [grant_form_filler SKILL.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/skills/grant_form_filler/SKILL.md) (弱点改善注記のフィードバック先)
 * 🗄️ [specifications.md](file:///Users/2005nk/Works/npo/civic/auto-grants-integrated/docs/specifications.md) (`public.alerts` DDL)
