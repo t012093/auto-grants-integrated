@@ -87,7 +87,7 @@ graph TD
   {"step":1,"kind":"mcp","tool":"create_project","args":{"name":"…","description":"…"}},
   {"step":2,"kind":"mcp","tool":"create_page","args":{"title":"🏠 …(ペラ1)","content":"…","project_id":{"$ref":"#/steps/1/result.project_id"}},"deps":[1]},
   {"step":3,"kind":"mcp","tool":"create_page","args":{"title":"📖 詳細企画書","content":"…","project_id":{"$ref":"#/steps/1/result.project_id"},"parent_id":{"$ref":"#/steps/2/result.page_id"}},"deps":[1,2]},
-  {"step":4,"kind":"mcp","tool":"create_calendar_entry","args":{"title":"【締切】…","description":"…","entry_category":"助成金締切","date":"2026-08-31","project_id":{"$ref":"#/steps/1/result.project_id"}},"deps":[1]},
+  {"step":4,"kind":"mcp","tool":"create_calendar_entry","args":{"title":"【締切】…","description":"…","entry_category":"grant_deadline_main","date":"2026-08-31","all_day":true,"project_id":{"$ref":"#/steps/1/result.project_id"}},"deps":[1]},
   {"step":5,"kind":"write_back","tool":"update_proposal_ai_note_ids","args":{"proposal_id":"…","ai_note_project_id":{"$ref":"#/steps/1/result.project_id"},"ai_note_page_id":{"$ref":"#/steps/2/result.page_id"}},"deps":[1,2],"when":"create_project / create_page(ペラ1) 成功後"}
 ]
 ```
@@ -100,7 +100,7 @@ graph TD
 |---|---|---|
 | `create_project` | `name` | ✅ そのまま |
 | `create_page` | `title`+ / `project_id`・`parent_id`(任意) | `project_id` を Step1 の返り値で設定。詳細は `parent_id` でペラ1配下 |
-| `create_calendar_entry` | `title`+ / `entry_category`+ | `entry_category="助成金締切"`, `date`=助成金 `deadline` |
+| `create_calendar_entry` | `title`+ / `entry_category`+(enum) | `entry_category="grant_deadline_main"`(本命締切), `date`=助成金 `deadline`, `all_day=True` |
 | `create_announcement` | `title`+ / `description`+ | `description` キーを使用(`content` ではない) |
 | `create_task` | `project_id`+ / `title`+ | `project_id` を Step1 の返り値で設定 |
 

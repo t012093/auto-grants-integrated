@@ -259,13 +259,14 @@ class AiNoteMeetSyncer:
                 {
                     "title": f"【締切】{primary_grant['grant_title']}",
                     "description": f"助成金公募の最終締切日",
-                    # MCP 実契約で必須の entry_category
-                    "entry_category": "助成金締切",
+                    # MCP 実契約で必須の entry_category(enum値のみ。本命助成金締切= grant_deadline_main)
+                    "entry_category": "grant_deadline_main",
                     "date": deadline_str,
+                    "all_day": True,
                     "project_id": {"$ref": "#/steps/1/result.project_id"},
                 },
                 deps=[1],
-                key="create_calendar_entry は CalendarEntryCreate で title と entry_category が必須。date が null の場合は締切日未確定のため実行者が補完すること",
+                key="create_calendar_entry は CalendarEntryCreate で title と entry_category(enum) が必須。entry_category は実契約 enum の grant_deadline_main を使う。date が null の場合は締切日未確定のため実行者が補完すること",
             )
 
         # Step 5: アナウンス（オファー募集）

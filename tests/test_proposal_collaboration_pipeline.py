@@ -202,9 +202,16 @@ class TestAiNoteMeetSyncer:
         cal_calls = [e for e in log if e["tool"] == "create_calendar_entry"]
         assert len(cal_calls) == 1
         assert "中山間地域" in cal_calls[0]["args"]["title"]
-        # MCP 実契約: entry_category 必須 / deadline(助成金締切日) を date で伝播
-        assert cal_calls[0]["args"]["entry_category"] == "助成金締切"
+        # MCP 実契約: entry_category 必須(enum: grant_deadline_main) / deadline(助成金締切日) を date + all_day で伝播
+        _MCP_CAL_ENTRY_CATEGORIES = {
+            "internal_meeting", "external_meeting", "interview",
+            "grant_deadline_pre", "grant_deadline_main", "grant_result",
+            "infra_deadline", "general_event", "task_milestone",
+        }
+        assert cal_calls[0]["args"]["entry_category"] in _MCP_CAL_ENTRY_CATEGORIES
+        assert cal_calls[0]["args"]["entry_category"] == "grant_deadline_main"
         assert cal_calls[0]["args"]["date"] == "2026-08-31"
+        assert cal_calls[0]["args"]["all_day"] is True
         assert cal_calls[0]["args"]["project_id"] == {"$ref": "#/steps/1/result.project_id"}
 
     def test_announcement_created(self, sample_proposal, sample_grants, sample_offers):
