@@ -41,7 +41,8 @@ uv.lock
 # スクリプト実行出力物
 .output/
 .cache/
-grants_national_*.csv
+data/pdfs/
+artifacts_*.json
 grants_national_*.json
 grants_national_*.xlsx
 grants_national_*.docx
