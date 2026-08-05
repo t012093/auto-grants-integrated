@@ -110,7 +110,8 @@ def migrate_table(conn, table_name, pk_col, dry_run=False, batch_size=100):
                         )
 
             offset += batch_size
-            print(f"進捗: {min(offset, total_rows)} / {total_rows} 処理完了 (更新件数: {updated_count}, 最終offset: {offset})")
+            pct = min(offset, total_rows) / total_rows * 100 if total_rows else 0
+            print(f"進捗: {min(offset, total_rows)} / {total_rows} ({pct:.1f}%) 処理完了 (更新件数: {updated_count})")
 
             if not dry_run:
                 conn.commit()

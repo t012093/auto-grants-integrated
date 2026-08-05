@@ -61,7 +61,7 @@ def fetch_grant_mappings(conn: psycopg.Connection, proposal_id: str) -> List[Dic
     rows = conn.execute(
         """
         SELECT pgm.grant_id, pgm.is_primary, pgm.match_score, pgm.status,
-               g.title AS grant_title, g.subsidy_max_limit
+               g.title AS grant_title, g.amount_max AS subsidy_max_limit
         FROM public.proposal_grant_mappings pgm
         JOIN public.grants g ON g.id = pgm.grant_id
         WHERE pgm.proposal_id = %s

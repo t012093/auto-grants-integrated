@@ -202,6 +202,11 @@ CREATE INDEX IF NOT EXISTS idx_reviews_proposal ON public.proposal_reviews_and_r
 -- ── grant_proposals (ルートテーブル: npo_id で直接判定) ──
 ALTER TABLE public.grant_proposals ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS proposals_owner_select ON public.grant_proposals;
+DROP POLICY IF EXISTS proposals_owner_insert ON public.grant_proposals;
+DROP POLICY IF EXISTS proposals_owner_update ON public.grant_proposals;
+DROP POLICY IF EXISTS proposals_owner_delete ON public.grant_proposals;
+
 CREATE POLICY proposals_owner_select ON public.grant_proposals FOR SELECT USING (
     npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())
 );
@@ -217,6 +222,11 @@ CREATE POLICY proposals_owner_delete ON public.grant_proposals FOR DELETE USING 
 
 -- ── proposal_grant_mappings (proposal_id 経由) ──
 ALTER TABLE public.proposal_grant_mappings ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS pgm_owner_select ON public.proposal_grant_mappings;
+DROP POLICY IF EXISTS pgm_owner_insert ON public.proposal_grant_mappings;
+DROP POLICY IF EXISTS pgm_owner_update ON public.proposal_grant_mappings;
+DROP POLICY IF EXISTS pgm_owner_delete ON public.proposal_grant_mappings;
 
 CREATE POLICY pgm_owner_select ON public.proposal_grant_mappings FOR SELECT USING (
     proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
@@ -234,6 +244,11 @@ CREATE POLICY pgm_owner_delete ON public.proposal_grant_mappings FOR DELETE USIN
 -- ── proposal_project_offers (proposal_id 経由) ──
 ALTER TABLE public.proposal_project_offers ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS offers_owner_select ON public.proposal_project_offers;
+DROP POLICY IF EXISTS offers_owner_insert ON public.proposal_project_offers;
+DROP POLICY IF EXISTS offers_owner_update ON public.proposal_project_offers;
+DROP POLICY IF EXISTS offers_owner_delete ON public.proposal_project_offers;
+
 CREATE POLICY offers_owner_select ON public.proposal_project_offers FOR SELECT USING (
     proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
 );
@@ -249,6 +264,11 @@ CREATE POLICY offers_owner_delete ON public.proposal_project_offers FOR DELETE U
 
 -- ── proposal_offer_entries (offer_id → proposal_project_offers → grant_proposals 経由) ──
 ALTER TABLE public.proposal_offer_entries ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS entries_owner_select ON public.proposal_offer_entries;
+DROP POLICY IF EXISTS entries_owner_insert ON public.proposal_offer_entries;
+DROP POLICY IF EXISTS entries_owner_update ON public.proposal_offer_entries;
+DROP POLICY IF EXISTS entries_owner_delete ON public.proposal_offer_entries;
 
 CREATE POLICY entries_owner_select ON public.proposal_offer_entries FOR SELECT USING (
     offer_id IN (SELECT id FROM public.proposal_project_offers WHERE proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid())))
@@ -266,6 +286,11 @@ CREATE POLICY entries_owner_delete ON public.proposal_offer_entries FOR DELETE U
 -- ── proposal_communications (proposal_id 経由) ──
 ALTER TABLE public.proposal_communications ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS comms_owner_select ON public.proposal_communications;
+DROP POLICY IF EXISTS comms_owner_insert ON public.proposal_communications;
+DROP POLICY IF EXISTS comms_owner_update ON public.proposal_communications;
+DROP POLICY IF EXISTS comms_owner_delete ON public.proposal_communications;
+
 CREATE POLICY comms_owner_select ON public.proposal_communications FOR SELECT USING (
     proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
 );
@@ -281,6 +306,11 @@ CREATE POLICY comms_owner_delete ON public.proposal_communications FOR DELETE US
 
 -- ── proposal_resource_allocations (proposal_id 経由) ──
 ALTER TABLE public.proposal_resource_allocations ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS resource_alloc_owner_select ON public.proposal_resource_allocations;
+DROP POLICY IF EXISTS resource_alloc_owner_insert ON public.proposal_resource_allocations;
+DROP POLICY IF EXISTS resource_alloc_owner_update ON public.proposal_resource_allocations;
+DROP POLICY IF EXISTS resource_alloc_owner_delete ON public.proposal_resource_allocations;
 
 CREATE POLICY resource_alloc_owner_select ON public.proposal_resource_allocations FOR SELECT USING (
     proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
@@ -298,6 +328,11 @@ CREATE POLICY resource_alloc_owner_delete ON public.proposal_resource_allocation
 -- ── proposal_audit_evidences (proposal_id 経由) ──
 ALTER TABLE public.proposal_audit_evidences ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS audit_owner_select ON public.proposal_audit_evidences;
+DROP POLICY IF EXISTS audit_owner_insert ON public.proposal_audit_evidences;
+DROP POLICY IF EXISTS audit_owner_update ON public.proposal_audit_evidences;
+DROP POLICY IF EXISTS audit_owner_delete ON public.proposal_audit_evidences;
+
 CREATE POLICY audit_owner_select ON public.proposal_audit_evidences FOR SELECT USING (
     proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
 );
@@ -313,6 +348,11 @@ CREATE POLICY audit_owner_delete ON public.proposal_audit_evidences FOR DELETE U
 
 -- ── proposal_reviews_and_retries (proposal_id 経由) ──
 ALTER TABLE public.proposal_reviews_and_retries ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS reviews_owner_select ON public.proposal_reviews_and_retries;
+DROP POLICY IF EXISTS reviews_owner_insert ON public.proposal_reviews_and_retries;
+DROP POLICY IF EXISTS reviews_owner_update ON public.proposal_reviews_and_retries;
+DROP POLICY IF EXISTS reviews_owner_delete ON public.proposal_reviews_and_retries;
 
 CREATE POLICY reviews_owner_select ON public.proposal_reviews_and_retries FOR SELECT USING (
     proposal_id IN (SELECT id FROM public.grant_proposals WHERE npo_id IN (SELECT id FROM public.npo_profiles WHERE owner_user_id = auth.uid()))
