@@ -46,6 +46,22 @@ graph TD
   - ページ単位の外部公開 (`publish_page`) による農家・行政との共有
   - 採択後の概算払い・タイムシートリマインダー自動化 (`create_automation_job`)
 
+### 3.2 同期メカニズム — `sync_proposal_to_ai_note_meet.py` は「MCP計画生成器」(実呼び出しは Agent)
+
+- **役割**: `scripts/sync_proposal_to_ai_note_meet.py` は ai-note-meet への同期を**直接 HTTP で実行しない**。
+  企画書データ(`grant_proposals`` + `proposal_grant_mappings`` + `proposal_project_offers`)を DB から読み、
+  「どの `mcp__ai_note_meet__*` ツールを、どの順番で、どの引数で呼ぶか」を**順序付き計画(JSON)** として生成する。
+  実際の同期呼び出しは **Agent (Antigravity/Hermes 等) が MCP ツールで実行**する。
+- **理由**: ai-note-meet へのアクセスは MCP により提供されており、外部HTTP APIの仕様を本リポジトリから
+  推測せず、環境と一貫させるため(HTTPクライアントの重複実装・未定義のAPIキー設定を避ける)。
+- **計画の末尾 (write_back)**: 計画の最終ステップ `update_proposal_ai_note_ids` が、実行者に対し
+  `create_project` / `create_page` の返り値IDで `grant_proposals.ai_note_project_id` / `ai_note_page_id` を
+  UPDATE すると指示する。これにより次回以降が冪等(早期スキップ)になる。
+- **冪等性**: `ai_note_project_id` が既に設定済みの企画書は、`sync()` 冒頭で再度の計画生成を
+  スキップし `__already_synced` (kind=info) の計画のみ返す。
+- **CLI**: `--dry-run`(既定 False)・`--json`(計画を機械可読で出力)。どちらの場合も本スクリプトは実MCPを
+  呼ばず計画のみを生成する。
+
 ---
 
 ## 4. 人間 ✕ AI タスク自動分離ルール (`skills/task_human_ai_allocator`)

@@ -156,8 +156,20 @@ class TestAiNoteMeetSyncer:
         syncer = AiNoteMeetSyncer(dry_run=True)
         log = syncer.sync(sample_proposal, sample_grants, sample_offers)
         # 期待ステップ: project(1) + summary_page(1) + detail_page(1) + calendar(1)
-        #              + announcement(1) + tasks(3) = 8
-        assert len(log) == 8
+        #              + announcement(1) + tasks(3) + write_back(1) = 9
+        assert len(log) == 9
+        # 計画の最後は実行者(Agent)による DB 書き戻しステップ
+        assert log[-1]["tool"] == "update_proposal_ai_note_ids"
+        assert log[-1]["kind"] == "write_back"
+
+    def test_idempotent_skip_when_already_synced(self, sample_proposal, sample_grants, sample_offers):
+        """ai_note_project_id が設定済みなら、再同期せずスキップ計画のみ返す"""
+        syncer = AiNoteMeetSyncer(dry_run=True)
+        already = dict(sample_proposal, ai_note_project_id="proj_123", ai_note_page_id="page_456")
+        log = syncer.sync(already, sample_grants, sample_offers)
+        assert len(log) == 1
+        assert log[0]["tool"] == "__already_synced"
+        assert log[0]["kind"] == "info"
 
     def test_first_step_is_create_project(self, sample_proposal, sample_grants, sample_offers):
         """最初のステップが create_project であること"""
