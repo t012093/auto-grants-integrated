@@ -41,6 +41,31 @@ class NPOProfileEmbedder:
         self.model = SentenceTransformer(model_name)
         logging.info("Model loaded successfully.")
 
+    def _fetch_past_awards(self, npo: Dict[str, Any], cur: Any) -> List[Dict[str, Any]]:
+        """grant_past_awards から自団体の受賞実績を取得 (recipient_name 一致 or is_own_achievement)."""
+        name = npo.get("name") or ""
+        try:
+            cur.execute(
+                "SELECT funder_name, program_name, award_year, project_title, project_summary, "
+                "evaluation_comment, award_amount, source_url, is_own_achievement "
+                "FROM public.grant_past_awards "
+                "WHERE is_own_achievement = TRUE ORDER BY award_year;"
+            )
+            rows = cur.fetchall()
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                return rows
+            # dict_row でない環境向けに名前で再取得
+            cur.execute(
+                "SELECT funder_name, program_name, award_year, project_title, project_summary, "
+                "evaluation_comment, award_amount, source_url "
+                "FROM public.grant_past_awards WHERE recipient_name ILIKE %s ORDER BY award_year;",
+                (f"%{name}%",),
+            )
+            return cur.fetchall() or []
+        except Exception as e:
+            logging.warning(f"grant_past_awards fetch failed: {e}")
+            return []
+
     def process_npo(self, npo: Dict[str, Any], cur: Any) -> int:
         npo_id = str(npo["id"])
         npo_name = npo.get("name", "名称未設定")
@@ -60,11 +85,33 @@ class NPOProfileEmbedder:
             aud_text = f"支援対象・ターゲット層: {', '.join(audiences)}"
             chunks.append(("TARGET_AUDIENCE", aud_text))
 
-        # 3. DESCRIPTION
+        # 3. DESCRIPTION (+ track_records を統合した完全な団体概要)
         desc = npo.get("description") or ""
+        trs = npo.get("track_records") or []
         if desc.strip():
             desc_text = f"団体概要・事業目的: {desc.strip()}"
+            if isinstance(trs, list):
+                for tr in trs:
+                    if isinstance(tr, dict) and tr.get("summary"):
+                        desc_text += f"\n実績サマリー: {tr['summary']}"
             chunks.append(("DESCRIPTION", desc_text))
+
+        # 4. PAST_AWARD_{n}: 過去の助成金受賞実績 (grant_past_awards)
+        for i, a in enumerate(self._fetch_past_awards(npo, cur), start=1):
+            funder = a.get("funder_name") if isinstance(a, dict) else None
+            program = a.get("program_name") if isinstance(a, dict) else None
+            year = a.get("award_year") if isinstance(a, dict) else None
+            title = a.get("project_title") if isinstance(a, dict) else None
+            summary = a.get("project_summary") if isinstance(a, dict) else None
+            eval_c = a.get("evaluation_comment") if isinstance(a, dict) else None
+            parts = [f"過去の助成金受賞実績({year}年): {funder}{('/'+program) if program else ''}"]
+            if title:
+                parts.append(f"事業: {title}")
+            if summary:
+                parts.append(f"概要: {summary}")
+            if eval_c:
+                parts.append(f"評価: {eval_c}")
+            chunks.append((f"PAST_AWARD_{i}", " ".join(parts)))
 
         if not chunks:
             logging.warning(f"No valid text fields found for NPO ID: {npo_id}")
