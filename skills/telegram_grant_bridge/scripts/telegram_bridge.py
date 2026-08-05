@@ -223,6 +223,8 @@ def run_generate_proposal(grant_id: str) -> str:
             [sys.executable, str(script), "--org-id", org_id, "--grant-id", grant_id, "--markdown-only"],
             capture_output=True, text=True, timeout=300,
         )
+        if r.returncode != 0 or "Error" in (r.stderr or ""):
+            return f"⚠️ 企画書起稿失敗: {(r.stderr or r.stdout)[-200:]}"
         return f"✅ 企画書を起稿しました (grant {grant_id})"
     except Exception as e:
         return f"⚠️ 企画書起稿エラー: {e}"

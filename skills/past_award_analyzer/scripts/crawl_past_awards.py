@@ -174,8 +174,8 @@ class PastAwardCollector:
                 recipient_name = parts[0].strip()
                 project_title = parts[1].strip()
 
-            # 金額・年度の抽出
-            award_amount = parse_amount(clean_el_text) or 1000000
+            # 金額・年度の抽出 (パース不能時は None を保存し、捏造値で埋めない)
+            award_amount = parse_amount(clean_el_text)
             award_year = parse_year(clean_el_text)
 
             records.append({
@@ -186,8 +186,9 @@ class PastAwardCollector:
                 "recipient_name": recipient_name,
                 "project_title": project_title,
                 "award_amount": award_amount,
-                "project_summary": f"{project_title} による地域課題解決事業。",
-                "evaluation_comment": "地域密着度と継続性が高く評価されました。",
+                # 実ページから抽出できないフィールドは捏造せず None のまま保存する
+                "project_summary": None,
+                "evaluation_comment": None,
                 "source_url": source_url or profile.get("url", "")
             })
 

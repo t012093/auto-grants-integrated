@@ -140,6 +140,8 @@ def main():
     parser.add_argument("--grant-id", type=int, required=True)
     parser.add_argument("--dry-run", action="store_true", help="DB書込せず選定結果のみ表示")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--json", action="store_true",
+                        help="結果をJSONのみstdoutに1行出力(deep_dive連携用)")
     args = parser.parse_args()
 
     if not DATABASE_URL:
@@ -150,24 +152,34 @@ def main():
         with conn.cursor() as cur:
             result = harvest_for_grant(cur, args.grant_id)
             if not result["ok"]:
-                print("❌ " + result["message"])
-                for u, t, s in result.get("found", []):
-                    print(f"   - {t!r} {u[:110]} ({s})")
+                if args.json:
+                    print(json.dumps({"ok": False, "grant_id": args.grant_id,
+                                      "message": result["message"],
+                                      "found": result.get("found", [])},
+                                     ensure_ascii=False, default=str))
+                else:
+                    print("❌ " + result["message"])
+                    for u, t, s in result.get("found", []):
+                        print(f"   - {t!r} {u[:110]} ({s})")
                 sys.exit(1)
-            print("✅ 選定:", result["selected_text"])
-            print("   URL:", result["selected_url"])
-            print("   → attachment_urls:", result["attachment_urls"])
-            if args.verbose:
-                print("\n見つかったPDF:")
-                for u, t, s in result["found"]:
-                    print(f"   - {t!r} {u[:110]} ({s})")
             if not args.dry_run:
                 cur.execute("UPDATE public.grants SET attachment_urls=%s, updated_at=NOW() WHERE id=%s;",
                             (result["attachment_urls"], args.grant_id))
                 conn.commit()
-                print(f"\n✅ grant {args.grant_id} の attachment_urls を更新しました (dry-runではない)")
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, default=str))
             else:
-                print("\n(--dry-run のため DB は更新していません)")
+                print("✅ 選定:", result["selected_text"])
+                print("   URL:", result["selected_url"])
+                print("   → attachment_urls:", result["attachment_urls"])
+                if args.verbose:
+                    print("\n見つかったPDF:")
+                    for u, t, s in result["found"]:
+                        print(f"   - {t!r} {u[:110]} ({s})")
+                if not args.dry_run:
+                    print(f"\n✅ grant {args.grant_id} の attachment_urls を更新しました (dry-runではない)")
+                else:
+                    print("\n(--dry-run のため DB は更新していません)")
 
 
 if __name__ == "__main__":

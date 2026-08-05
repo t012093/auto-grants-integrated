@@ -106,11 +106,28 @@ def download_anchor(page, anchor, dest_dir: Path, grant_id: int) -> dict:
 
 
 def extract_pdf_from_zip(zip_path: Path, dest_dir: Path, grant_id: int, zip_title: str) -> dict:
-    """zip を解凍し、中から最良の公募要領PDFを選定。"""
+    """zip を解凍し、中から最良の公募要領PDFを選定。パストラバーサル/zip bomb対策込み。"""
     exdir = dest_dir / f"grant{grant_id}_unzip"
+    exdir_root = exdir.resolve()
     exdir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as z:
-        z.extractall(exdir)
+        members = z.infolist()
+        # zip bomb 防御: 件数・総展開サイズに上限
+        if len(members) > 500 or sum(i.file_size for i in members) > 500 * 1024 * 1024:
+            return {"ok": False, "message": f"zipの件数/展開サイズが想定外のため中止 ({zip_title})"}
+        for member in members:
+            if member.is_dir():
+                continue
+            # メンバー名を basename のみに正規化して `../`・絶対パスを排除 (CWE-22/23)
+            name = Path(member.filename.replace("\\", "/")).name
+            if not name:
+                continue
+            dest = (exdir_root / name).resolve()
+            if not dest.is_relative_to(exdir_root):
+                logger.warning("zipに異常パス(トラバーサル)を検出、スキップ: %s", member.filename)
+                continue
+            with z.open(member) as src, open(dest, "wb") as out:
+                out.write(src.read())
     pdfs = [p for p in exdir.rglob("*") if p.suffix.lower() == ".pdf"]
     if not pdfs:
         return {"ok": False, "message": f"zip内にPDF無し ({zip_title})"}

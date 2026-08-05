@@ -112,8 +112,8 @@ def main():
                "before_coverage": cov, "unevaluated_before": uneval}
         if not args.dry_run:
             # 1) harvest
-            h = run_script(py, [str(SCRIPTS / "harvest_grant_pdfs.py"), "--grant-id", str(gid)], timeout=120)
-            rec["harvest"] = (h or {}).get("selected_url") if h and h.get("ok") not in (0, False) else None
+            h = run_script(py, [str(SCRIPTS / "harvest_grant_pdfs.py"), "--grant-id", str(gid), "--json"], timeout=120)
+            rec["harvest"] = (h or {}).get("selected_url") if h and h.get("ok") else None
             if not (rec["harvest"]):
                 # harvest 失敗 or 対象PDFなし → extract はスキップ
                 logger.warning("grant %s: harvest で公募要領PDFを特定できず extract スキップ", gid)

@@ -135,7 +135,7 @@ class TwoLayerScorer:
         r = cur.fetchone()
         ncount = (r["c"] if isinstance(r, dict) else r[0]) if r else 0
         if ncount == 0:
-            return (0.0, True, "NPO実績ベクトル未登録(不足)")
+            return (None, False, "NPO実績ベクトル未登録(要深掘り)")
         embedder = self.get_embedder()
         passed = 0
         for req in reqs[:20]:
