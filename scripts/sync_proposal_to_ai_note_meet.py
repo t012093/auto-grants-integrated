@@ -3,15 +3,17 @@
 Sync Proposal to ai-note-meet (sync_proposal_to_ai_note_meet.py)
 
 auto-grants-integrated の grant_proposals テーブルから企画書データを取得し、
-ai-note-meet の MCP ツール群を呼び出して以下を自動キックオフする：
+ai-note-meet の MCP ツール群を呼び出すための「実行計画(MCP計画生成器)」を生成する。
+計画は以下のステップ(順序付き JSON)で構成される(実呼び出しは Agent が mcp__ai_note_meet__* で実行):
   1. プロジェクト作成 (create_project)
   2. 企画書 Fumadocs Wiki ページ作成 (create_page: ペラ1サマリー + 詳細)
   3. カレンダーへ締め切り・事前相談日を登録 (create_calendar_entry)
   4. メンバー募集オファーのアナウンス投稿 (create_announcement)
   5. ポジション別初期タスクの自動アサイン (create_task)
+  6. (実行後) 連携IDの grant_proposals 書き戻し (write_back: update_proposal_ai_note_ids)
 
 Usage:
-    uv run scripts/sync_proposal_to_ai_note_meet.py --proposal-id <UUID>
+    uv run scripts/sync_proposal_to_ai_note_meet.py --proposal-id <UUID> [--json]
 """
 
 import os
@@ -61,7 +63,8 @@ def fetch_grant_mappings(conn: psycopg.Connection, proposal_id: str) -> List[Dic
     rows = conn.execute(
         """
         SELECT pgm.grant_id, pgm.is_primary, pgm.match_score, pgm.status,
-               g.title AS grant_title, g.amount_max AS subsidy_max_limit
+               g.title AS grant_title, g.amount_max AS subsidy_max_limit,
+               g.deadline AS grant_deadline
         FROM public.proposal_grant_mappings pgm
         JOIN public.grants g ON g.id = pgm.grant_id
         WHERE pgm.proposal_id = %s
@@ -153,13 +156,12 @@ class AiNoteMeetSyncer:
     """
     ai-note-meet MCP ツールの呼び出しを行うハンドラークラス。
 
-    NOTE: 実際の MCP 呼び出しは Antigravity Agent 経由で行われるため、
+    NOTE: 実際の MCP 呼び出しは Agent 経由で行われるため、
     このクラスは「どのツールを、どの順番で、どのデータで呼ぶか」を
-    構造化して出力する役割を担う（ドライラン対応）。
+    構造化して出力する役割を担う(計画生成のみ)。
     """
 
-    def __init__(self, dry_run: bool = False):
-        self.dry_run = dry_run
+    def __init__(self):
         self.plan: List[Dict[str, Any]] = []
 
     def _add_step(self, tool_name: str, args: Dict[str, Any], kind: str = "mcp", **extra) -> Dict[str, Any]:
@@ -168,6 +170,18 @@ class AiNoteMeetSyncer:
         本スクリプトは実際の MCP 呼び出しを行わず、実行順序・引数を構造化した
         「計画」だけを持つ。実実行は Agent(Antigravity/Hermes 等)が mcp__ai_note_meet__*
         を呼び、終了後に本計画の write_back ステップへ従って DB を書き戻す。
+
+        計画スキーマ:
+          - step : 1始まりの実行順
+          - kind : "mcp"(MCP呼び出し) / "info"(スキップ等の情報) / "write_back"(実行後DB更新)
+          - tool : mcp__ai_note_meet__* のツール名(または特殊名)
+          - args : 呼び出し引数
+          - deps : 依存する先行 step 番号のリスト(任意)
+          - key  : 実行者への契約・解決指示(任意)
+
+        args 内の値が {"$ref": "#/steps/<N>/result.<field>"} のときは、
+        実行者は step N の MCP 返り値の <field>(例: project_id / page_id)を
+        代入してから呼び出すこと。
         """
         entry: Dict[str, Any] = {
             "step": len(self.plan) + 1,
@@ -179,10 +193,6 @@ class AiNoteMeetSyncer:
         self.plan.append(entry)
         logger.info("[PLAN] %s: %s", tool_name, json.dumps(args, ensure_ascii=False)[:200])
         return entry
-
-    def _call(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        """後方互換: MCP 計画ステップを追加する。"""
-        return self._add_step(tool_name, args)
 
     def sync(self, proposal: Dict, grants: List[Dict], offers: List[Dict]) -> List[Dict]:
         """
@@ -209,25 +219,54 @@ class AiNoteMeetSyncer:
 
         # Step 2: ペラ1 Wiki ページ作成
         summary_md = generate_summary_page(proposal, grants, offers)
-        self._add_step("create_page", {
-            "title": f"🏠 プロジェクト概要 (ペラ1): {project_name}",
-            "content": summary_md,
-        })
+        self._add_step(
+            "create_page",
+            {
+                "title": f"🏠 プロジェクト概要 (ペラ1): {project_name}",
+                "content": summary_md,
+                # create_project の返り値 project_id を必ず受け継ぐ(孤立ページ防止)
+                "project_id": {"$ref": "#/steps/1/result.project_id"},
+            },
+            deps=[1],
+            key="$ref 解決: create_page は MCP 実契約上 project_id を持つ(任意)。create_project(Step1) の返り値 project_id を渡さないとプロジェクトに紐付かない孤立ページになる",
+        )
 
-        # Step 3: 詳細企画書ページ作成
+        # Step 3: 詳細企画書ページ作成 (ペラ1の子ページとして階層化)
         if proposal.get("content_markdown"):
-            self._add_step("create_page", {
-                "title": f"📖 詳細企画書: {project_name}",
-                "content": proposal["content_markdown"],
-            })
+            self._add_step(
+                "create_page",
+                {
+                    "title": f"📖 詳細企画書: {project_name}",
+                    "content": proposal["content_markdown"],
+                    "project_id": {"$ref": "#/steps/1/result.project_id"},
+                    # Fumadocs の「トップ: ペラ1 / 配下: 詳細」構成を再現
+                    "parent_id": {"$ref": "#/steps/2/result.page_id"},
+                },
+                deps=[1, 2],
+                key="$ref 解決: Step2 ペラ1 の返り値 page_id を parent_id に渡して子ページ化する",
+            )
 
         # Step 4: カレンダー登録 (本命助成金の締切)
         primary_grant = next((g for g in grants if g.get("is_primary")), None)
         if primary_grant:
-            self._add_step("create_calendar_entry", {
-                "title": f"【締切】{primary_grant['grant_title']}",
-                "description": f"助成金公募の最終締切日",
-            })
+            grant_deadline = primary_grant.get("grant_deadline")
+            # psycopg は DATE を Python date で返すが、テスト等の str にも対応
+            deadline_str = (
+                grant_deadline.isoformat() if hasattr(grant_deadline, "isoformat") else str(grant_deadline)
+            ) if grant_deadline else None
+            self._add_step(
+                "create_calendar_entry",
+                {
+                    "title": f"【締切】{primary_grant['grant_title']}",
+                    "description": f"助成金公募の最終締切日",
+                    # MCP 実契約で必須の entry_category
+                    "entry_category": "助成金締切",
+                    "date": deadline_str,
+                    "project_id": {"$ref": "#/steps/1/result.project_id"},
+                },
+                deps=[1],
+                key="create_calendar_entry は CalendarEntryCreate で title と entry_category が必須。date が null の場合は締切日未確定のため実行者が補完すること",
+            )
 
         # Step 5: アナウンス（オファー募集）
         if offers:
@@ -236,10 +275,15 @@ class AiNoteMeetSyncer:
                 for o in offers if o["status"] == "RECRUITING"
             )
             if positions_text:
-                self._add_step("create_announcement", {
-                    "title": f"【新プロジェクト発足】{project_name} メンバー募集！",
-                    "content": f"以下のポジションでメンバーを先着順で募集します。\n\n{positions_text}",
-                })
+                self._add_step(
+                    "create_announcement",
+                    {
+                        "title": f"【新プロジェクト発足】{project_name} メンバー募集！",
+                        # MCP 実契約上 create_announcement は description を要求する(content ではない)
+                        "description": f"以下のポジションでメンバーを先着順で募集します。\n\n{positions_text}",
+                    },
+                    key="create_announcement は title と description が必須(MCP実契約)。旧 content キーは使用しない",
+                )
 
         # Step 6: ポジション別タスクの自動生成
         for offer in offers:
@@ -250,10 +294,17 @@ class AiNoteMeetSyncer:
                 except json.JSONDecodeError:
                     tasks = []
             for task_title in tasks:
-                self._add_step("create_task", {
-                    "title": task_title,
-                    "description": f"ポジション: {offer['position_name']}",
-                })
+                self._add_step(
+                    "create_task",
+                    {
+                        "title": task_title,
+                        "description": f"ポジション: {offer['position_name']}",
+                        # MCP 実契約上 create_task は project_id と title が必須
+                        "project_id": {"$ref": "#/steps/1/result.project_id"},
+                    },
+                    deps=[1],
+                    key="create_task は project_id と title が必須(MCP実契約: task_tools)。project_id 未指定だと -32602 エラー",
+                )
 
         # Step 7(実行後): MCP で取得した ai-note-meet 連携IDを grant_proposals へ書き戻す
         #   (実行者=Agent が create_project / create_page の返り値IDで実行する)
@@ -261,42 +312,21 @@ class AiNoteMeetSyncer:
             "update_proposal_ai_note_ids",
             {
                 "proposal_id": proposal.get("id"),
-                "ai_note_project_id": "<create_projectの返り値>",
-                "ai_note_page_id": "<create_pageの返り値>",
+                "ai_note_project_id": {"$ref": "#/steps/1/result.project_id"},
+                # ペラ1(Step2)のページIDのみを保持。詳細ページはペラ1の子として project 配下に存在する
+                "ai_note_page_id": {"$ref": "#/steps/2/result.page_id"},
             },
             kind="write_back",
-            when="create_project / create_page が成功し ID を取得できた後に実行",
-            note="grant_proposals の ai_note_project_id / ai_note_page_id を更新して冪等化する",
+            deps=[1, 2],
+            when="create_project / create_page(ペラ1) が成功し ID を取得できた後に実行",
+            note="grant_proposals の ai_note_project_id / ai_note_page_id を更新して冪等化する。ai_note_page_id はペラ1(Step2)のページID",
         )
 
         return self.plan
 
 
 # =============================================================================
-# 4. DB への ai-note-meet 連携ID書き戻し
-# =============================================================================
-
-def update_proposal_ai_note_ids(
-    conn: psycopg.Connection,
-    proposal_id: str,
-    project_id: str,
-    page_id: str,
-) -> None:
-    """ai-note-meet のプロジェクトID・ページIDを grant_proposals に書き戻す。"""
-    conn.execute(
-        """
-        UPDATE public.grant_proposals
-        SET ai_note_project_id = %s, ai_note_page_id = %s, updated_at = NOW()
-        WHERE id = %s
-        """,
-        (project_id, page_id, proposal_id),
-    )
-    conn.commit()
-    logger.info(f"Updated proposal {proposal_id}: project_id={project_id}, page_id={page_id}")
-
-
-# =============================================================================
-# 5. CLI エントリーポイント
+# 4. CLI エントリーポイント
 # =============================================================================
 
 def main():
@@ -306,10 +336,6 @@ def main():
     parser.add_argument(
         "--proposal-id", required=True,
         help="同期する grant_proposals の UUID"
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true", default=False,
-        help="計画のみ表示(本スクリプトは元々計画生成のみ。既定でも実MCP呼び出しは行わない)"
     )
     parser.add_argument(
         "--json", action="store_true",
@@ -336,7 +362,7 @@ def main():
         logger.info(f"  Positions: {len(offers)}")
 
         # 同期計画を構築
-        syncer = AiNoteMeetSyncer(dry_run=args.dry_run)
+        syncer = AiNoteMeetSyncer()
         plan = syncer.sync(proposal, grants, offers)
 
     # 出力

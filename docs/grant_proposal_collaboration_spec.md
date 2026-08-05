@@ -59,8 +59,53 @@ graph TD
   UPDATE すると指示する。これにより次回以降が冪等(早期スキップ)になる。
 - **冪等性**: `ai_note_project_id` が既に設定済みの企画書は、`sync()` 冒頭で再度の計画生成を
   スキップし `__already_synced` (kind=info) の計画のみ返す。
-- **CLI**: `--dry-run`(既定 False)・`--json`(計画を機械可読で出力)。どちらの場合も本スクリプトは実MCPを
-  呼ばず計画のみを生成する。
+- **CLI**: `--json`(計画を機械可読で出力)を任意指定。本スクリプトは**常に**実MCPを呼ばず計画のみを生成する
+  (ドライラン用フラグは不要。実同期は Agent が `mcp__ai_note_meet__*` を実行)。
+
+### 3.2.1 計画 JSON スキーマ($ref 依存連鎖)
+
+各ステップは以下の構造を持つ:
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `step` | int | 1始まりの実行順 |
+| `kind` | str | `mcp`(MCP呼び出し) / `info`(スキップ) / `write_back`(実行後DB更新) |
+| `tool` | str | `mcp__ai_note_meet__*` のツール名(または特殊名) |
+| `args` | object | 呼び出し引数 |
+| `deps` | int[] | 依存する先行 step 番号(任意) |
+| `key` / `when` / `note` | str | 実行者への契約・解決指示(任意) |
+
+`args` 内の値が `{"$ref": "#/steps/<N>/result.<field>"}` のとき、実行者は step N の MCP 返り値の
+`<field>`(例 `project_id` / `page_id`)を代入してから呼び出す。これにより `create_project` の返り値
+`project_id` が後続の `create_page` / `create_calendar_entry` / `create_task` へ確実に受け継がれ、
+孤立レコードや task 作成失敗(-32602)を防ぐ。
+
+**例 (ペラ1 + 詳細 + 締切カレンダー):**
+
+```json
+[
+  {"step":1,"kind":"mcp","tool":"create_project","args":{"name":"…","description":"…"}},
+  {"step":2,"kind":"mcp","tool":"create_page","args":{"title":"🏠 …(ペラ1)","content":"…","project_id":{"$ref":"#/steps/1/result.project_id"}},"deps":[1]},
+  {"step":3,"kind":"mcp","tool":"create_page","args":{"title":"📖 詳細企画書","content":"…","project_id":{"$ref":"#/steps/1/result.project_id"},"parent_id":{"$ref":"#/steps/2/result.page_id"}},"deps":[1,2]},
+  {"step":4,"kind":"mcp","tool":"create_calendar_entry","args":{"title":"【締切】…","description":"…","entry_category":"助成金締切","date":"2026-08-31","project_id":{"$ref":"#/steps/1/result.project_id"}},"deps":[1]},
+  {"step":5,"kind":"write_back","tool":"update_proposal_ai_note_ids","args":{"proposal_id":"…","ai_note_project_id":{"$ref":"#/steps/1/result.project_id"},"ai_note_page_id":{"$ref":"#/steps/2/result.page_id"}},"deps":[1,2],"when":"create_project / create_page(ペラ1) 成功後"}
+]
+```
+
+### 3.2.2 MCP 実契約との整合 (2026-08-05 確認)
+
+生成される計画は ai-note-meet の MCP 実契約(`backend/mcp/tools/*.py`)に従う:
+
+| ツール | 必須引数 | 計画での扱い |
+|---|---|---|
+| `create_project` | `name` | ✅ そのまま |
+| `create_page` | `title`+ / `project_id`・`parent_id`(任意) | `project_id` を Step1 の返り値で設定。詳細は `parent_id` でペラ1配下 |
+| `create_calendar_entry` | `title`+ / `entry_category`+ | `entry_category="助成金締切"`, `date`=助成金 `deadline` |
+| `create_announcement` | `title`+ / `description`+ | `description` キーを使用(`content` ではない) |
+| `create_task` | `project_id`+ / `title`+ | `project_id` を Step1 の返り値で設定 |
+
+**ページIDの保持方針**: `grant_proposals.ai_note_page_id` は**ペラ1(Step2)ページのIDのみ**を保持する。
+詳細企画書ページはペラ1の子ページ(`parent_id`)として project 配下に存在し、個別IDは管理しない。
 
 ---
 
@@ -108,7 +153,7 @@ CREATE TABLE IF NOT EXISTS public.grant_proposals (
     concept_summary TEXT, -- ペラ1概要テキスト
     
     ai_note_project_id VARCHAR(100), -- ai-note-meet プロジェクトID
-    ai_note_page_id VARCHAR(100), -- ai-note-meet WikiページID
+    ai_note_page_id VARCHAR(100), -- ai-note-meet Wiki「ペラ1」ページID(詳細企画書はペラ1の子ページ)
     
     status VARCHAR(50) DEFAULT 'IDEA', 
     -- IDEA, DRAFT, IN_REVIEW, PARTNER_MATCHING, READY, SUBMITTED, ADOPTED, REJECTED, COMPLETED

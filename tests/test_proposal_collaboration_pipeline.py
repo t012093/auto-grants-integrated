@@ -62,6 +62,7 @@ def sample_grants() -> List[Dict[str, Any]]:
             "status": "CONSIDERING",
             "grant_title": "中山間地域所得確保推進事業",
             "subsidy_max_limit": 5000000,
+            "grant_deadline": "2026-08-31",
         },
     ]
 
@@ -151,9 +152,9 @@ class TestSummaryPageGeneration:
 class TestAiNoteMeetSyncer:
     """ai-note-meet MCP 連携テスト"""
 
-    def test_dry_run_generates_steps(self, sample_proposal, sample_grants, sample_offers):
-        """ドライランで正しいステップ数が生成されること"""
-        syncer = AiNoteMeetSyncer(dry_run=True)
+    def test_generates_plan_steps(self, sample_proposal, sample_grants, sample_offers):
+        """正しい計画ステップ数が生成されること"""
+        syncer = AiNoteMeetSyncer()
         log = syncer.sync(sample_proposal, sample_grants, sample_offers)
         # 期待ステップ: project(1) + summary_page(1) + detail_page(1) + calendar(1)
         #              + announcement(1) + tasks(3) + write_back(1) = 9
@@ -161,10 +162,14 @@ class TestAiNoteMeetSyncer:
         # 計画の最後は実行者(Agent)による DB 書き戻しステップ
         assert log[-1]["tool"] == "update_proposal_ai_note_ids"
         assert log[-1]["kind"] == "write_back"
+        # write_back は create_project / create_page の返り値を $ref 参照で受け継ぐ
+        assert log[-1]["args"]["ai_note_project_id"] == {"$ref": "#/steps/1/result.project_id"}
+        assert log[-1]["args"]["ai_note_page_id"] == {"$ref": "#/steps/2/result.page_id"}
+        assert log[-1]["deps"] == [1, 2]
 
     def test_idempotent_skip_when_already_synced(self, sample_proposal, sample_grants, sample_offers):
         """ai_note_project_id が設定済みなら、再同期せずスキップ計画のみ返す"""
-        syncer = AiNoteMeetSyncer(dry_run=True)
+        syncer = AiNoteMeetSyncer()
         already = dict(sample_proposal, ai_note_project_id="proj_123", ai_note_page_id="page_456")
         log = syncer.sync(already, sample_grants, sample_offers)
         assert len(log) == 1
@@ -173,41 +178,57 @@ class TestAiNoteMeetSyncer:
 
     def test_first_step_is_create_project(self, sample_proposal, sample_grants, sample_offers):
         """最初のステップが create_project であること"""
-        syncer = AiNoteMeetSyncer(dry_run=True)
+        syncer = AiNoteMeetSyncer()
         log = syncer.sync(sample_proposal, sample_grants, sample_offers)
         assert log[0]["tool"] == "create_project"
 
     def test_summary_page_is_created(self, sample_proposal, sample_grants, sample_offers):
         """ペラ1サマリーページが生成されること"""
-        syncer = AiNoteMeetSyncer(dry_run=True)
+        syncer = AiNoteMeetSyncer()
         log = syncer.sync(sample_proposal, sample_grants, sample_offers)
         page_calls = [e for e in log if e["tool"] == "create_page"]
         assert len(page_calls) == 2  # ペラ1 + 詳細企画書
         assert "ペラ1" in page_calls[0]["args"]["title"]
+        # ペラ1 は create_project(Step1) の project_id を受け継ぐ(孤立ページ防止)
+        assert page_calls[0]["args"]["project_id"] == {"$ref": "#/steps/1/result.project_id"}
+        # 詳細企画書はペラ1 の子ページ(parent_id 参照)として階層化される
+        assert page_calls[1]["args"]["project_id"] == {"$ref": "#/steps/1/result.project_id"}
+        assert page_calls[1]["args"]["parent_id"] == {"$ref": "#/steps/2/result.page_id"}
 
     def test_calendar_entry_created(self, sample_proposal, sample_grants, sample_offers):
         """カレンダーエントリが生成されること"""
-        syncer = AiNoteMeetSyncer(dry_run=True)
+        syncer = AiNoteMeetSyncer()
         log = syncer.sync(sample_proposal, sample_grants, sample_offers)
         cal_calls = [e for e in log if e["tool"] == "create_calendar_entry"]
         assert len(cal_calls) == 1
         assert "中山間地域" in cal_calls[0]["args"]["title"]
+        # MCP 実契約: entry_category 必須 / deadline(助成金締切日) を date で伝播
+        assert cal_calls[0]["args"]["entry_category"] == "助成金締切"
+        assert cal_calls[0]["args"]["date"] == "2026-08-31"
+        assert cal_calls[0]["args"]["project_id"] == {"$ref": "#/steps/1/result.project_id"}
 
     def test_announcement_created(self, sample_proposal, sample_grants, sample_offers):
         """オファーアナウンスが生成されること"""
-        syncer = AiNoteMeetSyncer(dry_run=True)
+        syncer = AiNoteMeetSyncer()
         log = syncer.sync(sample_proposal, sample_grants, sample_offers)
         ann_calls = [e for e in log if e["tool"] == "create_announcement"]
         assert len(ann_calls) == 1
         assert "メンバー募集" in ann_calls[0]["args"]["title"]
+        # MCP 実契約: create_announcement は description を要求(旧 content キーは不使用)
+        assert "description" in ann_calls[0]["args"]
+        assert "content" not in ann_calls[0]["args"]
 
     def test_tasks_created_per_position(self, sample_proposal, sample_grants, sample_offers):
         """各ポジションのタスクが生成されること"""
-        syncer = AiNoteMeetSyncer(dry_run=True)
+        syncer = AiNoteMeetSyncer()
         log = syncer.sync(sample_proposal, sample_grants, sample_offers)
         task_calls = [e for e in log if e["tool"] == "create_task"]
         # PM: 2タスク + LOCAL_DIR: 1タスク = 3タスク
         assert len(task_calls) == 3
+        # MCP 実契約: create_task は project_id と title が必須
+        for tc in task_calls:
+            assert tc["args"]["project_id"] == {"$ref": "#/steps/1/result.project_id"}
+            assert tc["deps"] == [1]
 
     def test_no_announcement_if_no_recruiting(self, sample_proposal, sample_grants):
         """募集ポジションがない場合はアナウンスが生成されないこと"""
@@ -223,7 +244,7 @@ class TestAiNoteMeetSyncer:
                 "status": "FILLED",
             }
         ]
-        syncer = AiNoteMeetSyncer(dry_run=True)
+        syncer = AiNoteMeetSyncer()
         log = syncer.sync(sample_proposal, sample_grants, filled_offers)
         ann_calls = [e for e in log if e["tool"] == "create_announcement"]
         assert len(ann_calls) == 0
