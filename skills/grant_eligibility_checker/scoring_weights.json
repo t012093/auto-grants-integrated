@@ -1,0 +1,24 @@
+{
+  "description": "助成金要件充足スコア 軸の既定重み (docs/scoring_redesign_plan.md §2)。合計=1.00。",
+  "version": 1,
+  "coverage_threshold": 0.6,
+  "thresholds": {
+    "eligible": 75,
+    "conditional": 55
+  },
+  "axes": {
+    "budget":            { "label": "予算規模適合",       "weight": 0.10, "logic": "mechanical", "llm": false },
+    "sem_activity":      { "label": "活動分野セマンティック", "weight": 0.15, "logic": "rag", "llm": false },
+    "sem_audience":      { "label": "対象層セマンティック",   "weight": 0.10, "logic": "rag", "llm": false },
+    "sem_purpose":       { "label": "事業目的一致性",     "weight": 0.10, "logic": "rag", "llm": false },
+    "req_rag":           { "label": "特定要件RAG充足",    "weight": 0.20, "logic": "rag", "llm": false },
+    "docs":              { "label": "書類準備率",          "weight": 0.15, "logic": "mechanical", "llm": false },
+    "expense":           { "label": "経費ルール整合",      "weight": 0.10, "logic": "mechanical", "llm": false },
+    "qual":              { "label": "定性ミッション合致",  "weight": 0.10, "logic": "llm", "llm": true }
+  },
+  "notes": [
+    "qual(llm)は既定OFF。coverage計算からは weight を含めず、evaluated=0 扱いとする(既定)。",
+    "機械軸(budget/docs/expense)とRAG軸(sem_*/req_rag)のみで判定。LLM有効化は --use-llm-qual フラグ。",
+    "重みは初期値。キャリブレーション(grant_past_awards蓄積後)で調整する。"
+  ]
+}
