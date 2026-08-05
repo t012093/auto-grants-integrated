@@ -36,11 +36,17 @@
 # ① 初回のみ: ログインセッション生成(headfulでブラウザが開く→jGrantsにログイン→Enter)
 env -u PYTHONPATH uv run skills/jgrants_search/scripts/resolve_pdf_l2.py login --session-out .cache/jgrants_state.json
 
-# ② 対象grantの公募要領PDFを取得・attachment_urlsへ登録(+extract_pdf実行)
-env -u PYTHONPATH uv run skills/jgrants_search/scripts/resolve_pdf_l2.py harvest --grant-id 20 --session .cache/jgrants_state.json --run-extract
+# ② 対象grantの公募要領PDFを取得・保存(+extract_pdf実行)
+env -u PYTHONPATH uv run skills/jgrants_search/scripts/resolve_pdf_l2.py harvest --grant-id 12 --session .cache/jgrants_state.json --run-extract
 ```
 - 実装: `skills/jgrants_search/scripts/resolve_pdf_l2.py`
-- 検証済み: ブランクセッションで「非ログイン=file-list空」を正しく診断。ログイン後 `.file-list a` が埋まれば抽出→DL→`%PDF`検証→`attachment_urls`登録→(任意)extract_pdf。
+- 検証済み: grant12 で**公募要領(交付要綱)PDFを認証セッションでDL(237KB)→extract→DB反映**成功。
+
+### 判明した実態 (2026-08-05 実測)
+- **認証**: jGrants は **gBizID** 認証。storage_state に `gbiz-id.go.jp` の SESSION/JSESSIONID/remember_me 等を保存。
+- **反ボット**: URL に `queueittoken=e_waitingroom~...`（**Queue-It 待合室**）が付くが、セッション有効なら自動通過して本文描画される。
+- **DL方式**: `.file-list` の `<a>` は **`href="#"`（JS駆動）**。直接URL取得不可 → **クリックで download イベント捕捉**し保存。公募要領は `.pdf` かつ「交付要綱/公募要領/実施要領」キーワードで選定（様式.xlsx/.doc は除外）。
+- **attachment_urls にはローカル保存パス**(`data/pdfs/...`)を登録(ダウンロードURLはセッション依存で不固定)。extract_pdf は `--pdf-path` でローカルを処理。
 
 ## 6. L3（Agentic / Gemini）設計メモ
 - 実行体(A): Hermes自身が Playwright/computer_use で探索（実装即・統合容易）→ **推奨**。
