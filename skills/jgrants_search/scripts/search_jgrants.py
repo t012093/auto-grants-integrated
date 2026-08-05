@@ -30,6 +30,36 @@ JGRANTS_DETAIL_API = "https://api.jgrants-portal.go.jp/exp/v1/public/subsidies/i
 RATE_10_10_PATTERNS = [r"10/10", r"10分の10", r"１０／１０", r"１０分の１０", r"定額", r"全額補助", r"100%"]
 ADVANCE_PATTERNS = [r"概算払", r"前払", r"前金", r"事前交付"]
 
+# 分野別検索プリセット (複数キーワード横断 → 和集合で重複排除)
+# `--preset <name>` で指定するとこれらのキーワードを順に API 検索する。
+# 「10/10 (全額補助)」はデフォルトで有効なので、そのまま --rate-10-10 で絞れる。
+PRESETS = {
+    # Open Coral NPO (教育/IT/アート/国際交流/子ども/地域活性化/AI etc.)
+    "npo-civic": [
+        "子ども", "教育", "アート", "ゲーム", "AI", "生成AI",
+        "地域活性化", "国際交流", "不登校", "フリースクール",
+        "デジタル", "研究",
+    ],
+    # 文化芸術・教育・福祉分野 (公募型 NPO 助成の定番領域)
+    "ngo": [
+        "文化", "芸術", "教育", "福祉", "子ども", "障害", "高齢者",
+        "環境", "国際協力", "地域づくり",
+    ],
+}
+
+
+def resolve_search_keywords(keyword: str, preset: str = "") -> list:
+    """検索キーワード列を解決する。
+    - --preset 指定 → そのプリセットの分野キーワード全体
+    - --keyword 指定 → 単一キーワード
+    - どちらも無し   → 主要 4 語 (全件網羅用)
+    """
+    if preset:
+        return list(PRESETS.get(preset, []))
+    if keyword:
+        return [keyword]
+    return ["助成金", "補助金", "支援"]
+
 
 def sanitize_text(text: Any) -> str:
     """PostgreSQL の TEXT / JSONB 保存でエラーとなる NUL 文字 (\x00) を自動除去する"""
@@ -213,11 +243,12 @@ async def run_search(
     limit: int,
     output_json: bool,
     save_db: bool = False,
+    preset: str = "",
 ):
     headers = {"User-Agent": "AutoGrantsBot/1.0", "Accept": "application/json"}
 
-    # キーワード横断取得ロジック
-    search_keywords = [keyword] if keyword else ["助成金", "補助金", "支援"]
+    # キーワード横断取得ロジック (プリセット/単一/主要4語を解決)
+    search_keywords = resolve_search_keywords(keyword, preset)
     list_items = []
     seen_ids = set()
 
@@ -336,6 +367,9 @@ async def run_search(
 def main():
     parser = argparse.ArgumentParser(description="jGrants 公式 API 条件検索 CLI")
     parser.add_argument("--keyword", type=str, default="", help="検索キーワード (未指定時は主要語で自動横断取得)")
+    parser.add_argument("--preset", type=str, default="", choices=list(PRESETS.keys()),
+                        help="分野別検索プリセット (複数キーワードを横断検索して和集合化)。"
+                             f"利用可能: {', '.join(PRESETS.keys())}")
     parser.add_argument("--area", type=str, default="全国", help="対象地域 (例: 富山県, 東京都, 全国)")
     parser.add_argument("--rate-10-10", action="store_true", default=True, help="補助率 10/10 (全額補助・定額) のみに絞り込む")
     parser.add_argument("--no-rate-10-10", action="store_false", dest="rate_10_10", help="10/10 フィルタを無効化")
@@ -359,6 +393,7 @@ def main():
             args.limit,
             args.json,
             args.save_db,
+            args.preset,
         )
     )
 

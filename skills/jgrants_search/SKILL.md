@@ -46,6 +46,12 @@ uv run skills/jgrants_search/scripts/search_jgrants.py --rate-10-10
 # 「全国」対象かつ「10/10 助成金」を検索
 uv run skills/jgrants_search/scripts/search_jgrants.py --area "全国" --rate-10-10
 
+# 分野別プリセット検索: NPO活動分野(子ども/教育/アート/ゲーム/AI/地域活性化等) × 10/10
+uv run skills/jgrants_search/scripts/search_jgrants.py --preset npo-civic --rate-10-10
+
+# 分野別プリセット検索 (文化芸術・教育・福祉分野) × 10/10 を DB へ保存
+uv run skills/jgrants_search/scripts/search_jgrants.py --preset ngo --rate-10-10 --save-db
+
 # 助成上限額 100 万円以上の 10/10 助成金を検索
 uv run skills/jgrants_search/scripts/search_jgrants.py --rate-10-10 --min-amount 1000000
 
@@ -63,6 +69,7 @@ uv run skills/jgrants_search/scripts/search_jgrants.py --area "全国" --rate-10
 | パラメーター | 型 | 説明 | 使用例 |
 |---|---|---|---|
 | `--keyword` | `string` | 検索キーワード（未指定時は主要キーワードで自動横断取得） | `--keyword "NPO"` |
+| `--preset` | `string` | 分野別検索プリセット名。複数キーワードを横断検索して和集合化。`npo-civic`(教育/IT/アート/子ども/地域etc), `ngo`(文化/福祉/環境etc) | `--preset npo-civic` |
 | `--area` | `string` | 対象地域（都道府県名または「全国」） | `--area "全国"` |
 | `--rate-10-10` | `flag` | 補助率 10/10 (定額・全額補助) のみに絞り込む | `--rate-10-10` |
 | `--advance-payment` | `flag` | 概算払い・前払い記載のあるものに絞り込む | `--advance-payment` |
@@ -82,6 +89,10 @@ uv run skills/jgrants_search/scripts/search_jgrants.py --area "全国" --rate-10
 2. **単一キーワード検索での大量漏脱**:
    * **問題**: `"助成金"` 単一キーワードのみで検索した場合、全体 306 件中 54 件（約 17%）しか取得できず、82.3% の「〜補助金」「〜事業」案件が漏脱します。
    * **解決策**: 自動巡回により 306 件全件を対象として抽出処理を行います。
+3. **API は keyword 検索のみ・エリア/10-10/金額はクライアント側**: 
+   * 一覧取得API `/v1/public/subsidies` は必須パラメータ `keyword` + `sort` + `order` + `acceptance` のみ受け付け、`area`/`limit`/`page` 等は**無視**されます（どれか1つ欠けると 400）。
+   * したがって「10/10」「対象地域」「前払い」「助成額」は **詳細取得API で個別取得→クライアント側で絞る**方式。本スキルの `--rate-10-10` / `--area` / `--advance-payment` / `--min-amount` / `--max-amount` がこれに相当します。
+   * 分野を複数抱える団体は `--preset` で分野キーワード列を横断検索し、その上で `--rate-10-10` 等で絞るのが効率的です。
 
 ---
 
