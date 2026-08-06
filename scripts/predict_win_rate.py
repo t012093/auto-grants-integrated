@@ -307,7 +307,7 @@ class PredictWinRate:
                     existing = cur.fetchone()
                     if existing and existing["model_version"] == str(self.weights.get("version", "")):
                         cur.execute(
-                            "SELECT overall_score, coverage, rank, provisional, axes_json, improvement_notes "
+                            "SELECT overall_score, coverage, rank, provisional, axes_json, improvement_notes, model_version "
                             "FROM public.grant_win_rank WHERE npo_profile_id = %s AND grant_id = %s",
                             (org_id, grant_id),
                         )

@@ -26,7 +26,7 @@
 実績（採択団体名・事業名・採択額・選定評コメント等）を、実Webサイトから
 **リサーチして収集したデータ**（`public.grant_past_awards`）を指す（`past_award_analyzer` が担当）。
 
-- ❌ ではない: 自社の応募実績・精算実績（それは `grant_applications`／`npo_profiles.track_records`）。
+- ❌ ではない: 自社の応募実績・精算実績（それは `grant_applications`／NPO プロファイルの `track_records` フィールド）。
 - ✅ だ: 「この財団は過去、どんなテーマ・規模・体制の事業を採択してきたか」＝**助成金側の採択傾向・勝因パターン**。
 - このデータを**8軸の根拠（ベンチマーク）**とし、自団体を当てはめて勝因フィット度を測る（§4 参照）。
 - 収集・分析は `past_award_analyzer`（`crawl_past_awards` → `analyze_past_awards`）の**5大視点**に委譲する。
@@ -89,7 +89,7 @@
 | 5 | 社会的インパクト・横展開 (Scalability) | 受益者数・多地域展開 | **新規**（target_audience / activity_areas 数） |
 | 6 | 積算の妥当性 (Budget Precision) | 見積・不透明経費・Solver検証 | `grant_expense_validator`（Solver 検証済みフラグ） |
 | 7 | 助成趣旨・テーマ適合 (Funder Intent) | 重点テーマとの意味的一致 | eligibility `sem_purpose` + **過去採択ベンチマーク** |
-| 8 | 過去の完了・信用 (Track Record) | 採択・精算完了実績 | `npo_profiles.track_records`（自社信用） |
+| 8 | 過去の完了・信用 (Track Record) | 採択・精算完了実績 | NPO プロファイル `track_records` フィールド（自社信用） |
 
 > 注: 軸7・8は「自社の信用実績（track_records）」と「助成金側の過去採択傾向（grant_past_awards）」を**別物として区別**する。前者は自社の過去実績、後者は**8軸全体の根拠ベンチマーク**（§3.1）として使う。
 
@@ -152,7 +152,7 @@
   - インパクト: `target_audience` 数 × `activity_areas` 数 を基準に正規化
   - 新規性: 企画書/活動に「新規/先進/モデル/革新」等の要素記述があるか（段階点）
   - 実現可能性: 連携・後援・体制記載の有無・数（段階点）
-  - 自社信用: `npo_profiles.track_records` の採択・精算完了実績数
+  - 自社信用: NPO プロファイル `track_records` フィールド（入力JSON由来。DB カラムではない）の採択・精算完了実績数、または `grant_applications` の AWARDED 実績数
 - すべて「データ欠落で評価不能」な軸は **未評価（evaluated=False）** とし、0点扱いにしない。
 - **LLM定性は eligibility と同じ規約**（evidence引用必須・数値創作禁止・評価不能なら evaluated=False）。
 
