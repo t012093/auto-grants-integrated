@@ -117,6 +117,8 @@
 
 > **現在は専門家初期値（`v1 expert prior`）を使用**。データ蓄積に応じて Stage 2 → 3 で更新する。
 > 重みは**コード直書きせず config（JSON）で管理**し、差し替え可能にする（eligibility の `axes_config` と同方式）。
+> **重みの実体**: `skills/grant_lifecycle_manager/win_rate_weights.json`（💡 実装時に新規作成）。gate 側の `scoring_weights.json` と同じく **`version` フィールド**を持つ。
+> **`model_version` の出所**: この JSON の `version` 値を `grant_win_rank.model_version`（§8.1）に保存する。重みを更新したら `version` を上げ、`model_version` 不一致で失効判定（§9.3）する。
 
 **8軸の重み（v1 expert prior・合計1.00）**
 
@@ -254,6 +256,32 @@
 - **条件**: `grant_applications` が数十件（目安50+）蓄積されたら実施。
 - **注意**: キャリブレーション前の総合スコアは「絶対確率」と表記しない（§2・原則1 と整合）。
 
+### 7.3 精度検証（hold-out）
+
+rank 制度自体が「当たるか」を、採択結果データで検証する手順。**キャリブレーション（重み更新）前に必ず実施**し、重み更新は検証に合格した後に行う。
+
+| 項目 | 内容 |
+|---|---|
+| 対象 | `grant_applications`（自社採択結果）が十分（目安50+件）溜まった時点 |
+| 分割 | 蓄積データを**学習 80% / 検証 20%（hold-out）**に分割 |
+| 手法 | rank（A/B/C/D）と採択/不採択の**一致度**を測る（rank 上位ほど採択率が高いこと） |
+| 指標 | 採択率が rank 順に単調増加するか（A > B > C > D）、上位 rank の採択率がベースラインを上回るか |
+| 合格基準 | 例: 学習データで重みを決めた後、hold-out で「A/B ランクの採択率 > ベースライン採択率」を確認 |
+| 失敗時 | hold-out で改善が見られなければ重み更新を**却下**し、現行 `model_version` を維持（Stage 2/3 の再配分に戻って再調整） |
+
+- **過学習防止**: 重みを学習データで何度も調整しすぎると hold-out に過剰適合するため、**評価は hold-out のみ**で行う（学習データで良くても hold-out が悪ければ却下）。
+- rank は相対順位なので、**絶対精度（％的中）ではなく上昇順位の整合性**で評価する（§2・原則1 と整合）。
+
+### 7.4 対象外・連携先（境界の明記）
+
+predict そのものは rank 計算に閉じる。周辺モジュールへの接続点は以下の方針とする（実装範囲を明確化）:
+
+| 連携先 | 扱い | 方針 |
+|---|---|---|
+| `export_calendar_ics.py`（カレンダー） | **本 spec の対象外** | rank/締切のカレンダー出力は別モジュールの責務。predict は rank 値の提供まで。 |
+| 書類取得リードタイム | **対象外** | 書類準備日数が docs 軸（schedule）に及ぼす影響は eligibility 側で扱う。predict は触らない。 |
+| Telegram 通知 | **対象外（接続先のみ明記）** | rank を通知に載せるかは `telegram_grant_bridge` 側の表示方針。predict は JSON を返すのみで、通知本文の生成はしない。載せる場合は `rank` + `coverage` を渡し、絶対確率の文言を出さない（§2・原則1）。 |
+
 ---
 
 ## 8. DB スキーマ提案
@@ -269,6 +297,7 @@ CREATE TABLE IF NOT EXISTS public.grant_win_rank (
   coverage       real,         -- 評価済み軸重み (0-1)
   rank           text,         -- A/B/C/D
   provisional    boolean DEFAULT false,
+  model_version  text,         -- 使用した重み定義の版 (例: 'v1-expert-prior'). 重み更新で陳腐化検知
   axes_json      jsonb,        -- 8軸スコア・evaluated・source
   improvement_notes jsonb,     -- 弱点改善注記
   created_at     timestamptz DEFAULT NOW(),
@@ -295,7 +324,59 @@ CREATE TABLE IF NOT EXISTS public.grant_applications (
 
 ---
 
-## 9. ロードマップ / フェーズ
+## 9. 運用・実行（トリガー & 入力前提・再計算ポリシー）
+
+### 9.1 実行トリガー: gate 通過（ELIGIBLE / CONDITIONAL）時に自動連動
+
+`predict_win_rate` は **gate（`grant_eligibility_checker`）が判定確定した時点で自動実行**する。
+
+```text
+crawl 新規grant出現
+   ↓
+eligibility_v2.run() → status 確定 (ELIGIBLE / CONDITIONAL / INELIGIBLE / PROVISIONAL)
+   ↓
+status ∈ {ELIGIBLE, CONDITIONAL} のとき
+   ↓
+predict_win_rate --org-id --grant-id   ← このタイミングで自動連動
+   ↓
+public.grant_win_rank に Upsert (UNIQUE(npo_profile_id, grant_id))
+```
+
+- rank は「gate 通過後の競争比較」が本質なので、**gate が通った瞬間に計算しておく**（申請判断時に即時参照できる）。
+- 実装上は `eligibility_v2._upsert_alert`（PASS 相当を保存）の直後に呼ぶ。ただし rank 計算はコスト高のため、**既存 `grant_win_rank` 行があり・入力前提が変化していない場合は再計算しない**（§9.3）。
+
+### 9.2 入力前提: rank は gate 通過済み alert のみ対象（gate 遮断）
+
+`predict_win_rate` は**冒頭で必ず gate 状態を確認**し、gate 未通過なら rank を生成しない：
+
+| `alerts.overall_status` | rank 計算 | 応答 |
+|---|---|---|
+| `ELIGIBLE` | ✅ 実行 | 通常の rank を返す |
+| `CONDITIONAL` | ✅ 実行 | 通常の rank を返す（※1） |
+| `INELIGIBLE` | ❌ 遮断 | `{status:"not_eligible"}`（gate に委ねる。※2） |
+| `PROVISIONAL` | ❌ 遮断 | `{status:"not_eligible"}`（書類/データ不足 = coverage 未達） |
+| alert 無し | ❌ 遮断 | `{status:"not_eligible"}`（gate 未実施 or ハードゲート不合格で alert 非作成） |
+
+> ※1 **CONDITIONAL でも rank は通常判定**。CONDITIONAL は「gate スコア 55〜74 の条件付き適合」であり、rank 側の `provisional`（過去採択データ不足）とは**別概念**。対応:
+> gate が CONDITIONAL だからといって rank の `provisional` を立てない（立つのは過去採択データ不足のときのみ、§4.2）。
+>
+> ※2 **INELIGIBLE は alert 行が無い場合がある**: 実装（`eligibility_v2.py`）では層1ハードゲート不合格は `persist=False` で alert を作らないため、その (org, grant) には `alerts` 行が存在しない。predict は「alert 行が無い」ことをもって遮断する。
+
+- **誤用防止**: CLI で直接 `--grant-id` を渡して gate を飛ばしても、内部で gate 結果（`alerts.overall_status`）を読み、通過のみ rank を出す。gate を再計算しない（既存 DB 値参照）ため、コスト節約 + gate/rank の整合を保つ。
+- **「gate の PROVISIONAL」と「rank の provisional」は別概念**: 前者＝書類/データ不足で gate 未確定、後者＝過去採択データ不足で rank が暫定。混同しない。
+
+### 9.3 再計算・失効ポリシー（重み更新・入力変化時）
+
+重み（`model_version`）は Stage 1→2→3 で更新される（§4.1）。更新時に既存 rank がどうなるかを定める：
+
+- **失効条件**: 保存済み `grant_win_rank.model_version` が**現行の重み版と不一致**になったら、その rank は「陳腐化」扱い（`provisional=true` に更新 or 表示上は失効マーク）。
+- **入力前提の変化**: 過去採択データ（`grant_past_awards`）や NPO プロファイル（`npo_profiles`）が更新された場合は、**対象の rank を再計算**する（Upsert で上書き）。
+- **自動再計算のタイミング**: 上記の変化が検知された次回の gate-trigger 実行時、または明示的な再計算バッチ（`predict_win_rate --recompute`）で実施。
+- **一度計算したら無闇に再計算しない（冪等）**: 入力前提（重み版・過去採択・プロファイル）が同一なら `grant_win_rank` の再計算をスキップし、既存行をそのまま返す。これにより gate 通過のたびに無駄な LLM/リサーチをしない。
+
+---
+
+## 10. ロードマップ / フェーズ
 
 | フェーズ | 内容 | 判定 |
 |---:|---|---|

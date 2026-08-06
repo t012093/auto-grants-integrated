@@ -75,7 +75,7 @@ skills/
 └── grant_lifecycle_manager/              # 6. タスク・カレンダー同期 & 採択予測
     ├── SKILL.md
     └── scripts/
-        ├── predict_win_rate.py           # 実効的 8軸モデルによる採択勝率 (0-100%) 予測 CLI
+        ├── predict_win_rate.py           # 実効的 8軸モデルによる採択予測 CLI (rank A-D・絶対確率(%)は出さない)
         └── export_calendar_ics.py        # 公募締切 & 準備タスクの iCal (.ics) カレンダー出力 CLI
 ```
 
