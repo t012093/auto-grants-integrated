@@ -1,0 +1,27 @@
+{
+  "description": "助成金 8軸採択予測 (grant_lifecycle_manager predict_win_rate) の重み定義 (v1 expert prior)。合計=1.00。",
+  "version": 1,
+  "coverage_threshold": 0.5,
+  "rank_thresholds": {
+    "A": 80,
+    "B": 65,
+    "C": 50,
+    "D": 0
+  },
+  "axes": {
+    "funder_intent":   { "label": "助成趣旨・テーマ適合",     "weight": 0.20, "reuse": "eligibility/sem_purpose+past_award" },
+    "severity":        { "label": "課題の深刻さ・エビデンス", "weight": 0.15, "reuse": "rule" },
+    "feasibility":     { "label": "実現可能性・体制",         "weight": 0.15, "reuse": "rule" },
+    "uniqueness":      { "label": "新規性・先駆性",           "weight": 0.10, "reuse": "rule" },
+    "scalability":     { "label": "社会的インパクト・横展開", "weight": 0.10, "reuse": "rule" },
+    "budget":          { "label": "積算の妥当性",             "weight": 0.10, "reuse": "expense_validator" },
+    "sustainability":  { "label": "自走性・自己資金",         "weight": 0.10, "reuse": "rule" },
+    "track_record":    { "label": "自社の過去信用実績",       "weight": 0.10, "reuse": "track_records+grant_applications" }
+  },
+  "notes": [
+    "重みは専門家初期値(v1 expert prior)。データ蓄積で Stage2/3 に更新する(spec §4.1)。",
+    "version を grant_win_rank.model_version に保存。更新時は version を上げ、不一致で陳腐化判定(spec §9.3)。",
+    "coverage < coverage_threshold(0.5) なら rank は『暫定』表記(spec §4.3)。",
+    "reuse=rule の軸は確定的ルールで算出(LLM定性は次のPhase)。"
+  ]
+}
