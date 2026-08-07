@@ -177,6 +177,21 @@ class ProposalGenerator:
         preferences = data.get("preferences") or []
         past_awards = data.get("past_awards") or []
         notes = data.get("notes") or []
+        win_rate_notes = data.get("win_rate_notes") or []  # predict_win_rate の improvement_notes (spec §6)
+
+        # 勝率改善注記の分類 (spec §6): 軸種別に応じた対象セクションへ反映
+        #   severity→§1 背景 / feasibility, sustainability→§4 実施体制 / 他→注記一覧のみ
+        def _notes_for(code: str):
+            return [n["note"] for n in win_rate_notes
+                    if isinstance(n, dict) and n.get("axis") == code]
+
+        severity_notes = _notes_for("severity")
+        feasibility_notes = _notes_for("feasibility")
+        sustainability_notes = _notes_for("sustainability")
+        if win_rate_notes:
+            for n in win_rate_notes:
+                if isinstance(n, dict) and n.get("note"):
+                    notes.append(f"🔍【勝率改善注記:{n.get('axis')}】{n['note']}")
 
         amount_max = grant.get("amount_max") or 2000000
 
@@ -236,7 +251,13 @@ class ProposalGenerator:
         md_lines.append("## 1. 事業の背景・社会的課題")
         md_lines.append(f"> **【公募要領 引用】** 「{detail_quote}」\n")
         md_lines.append(f"当団体（{npo.get('name')}）が活動を展開する地域においては、急速な社会変化に伴いコミュニティの基盤維持および支援ニーズの高度化が深刻な課題となっています。")
-        md_lines.append("特に当事者のニーズ調査や地域統計においても、従来のアプローチではカバーしきれない支援の空白地帯が存在しており、持続可能な支援体制の構築が急務となっています。\n")
+        md_lines.append("特に当事者のニーズ調査や地域統計においても、従来のアプローチではカバーしきれない支援の空白地帯が存在しており、持続可能な支援体制の構築が急務となっています。")
+        if severity_notes:
+            md_lines.append("")
+            md_lines.append("🔍**【勝率改善注記（課題の深刻さ）】**")
+            for _nt in severity_notes:
+                md_lines.append(f"- {_nt}")
+        md_lines.append("")
 
         # 2. 事業目的
         md_lines.append("## 2. 事業目的")
@@ -275,6 +296,11 @@ class ProposalGenerator:
                 md_lines.append(f"- **{rec.get('grant_name')}** ({rec.get('award_year')}年 / 交付採択額: {rec.get('award_amount', 0):,}円)")
                 md_lines.append(f"  - 事業名: {rec.get('project_title')}")
                 md_lines.append(f"  - 概要・成果: {rec.get('summary')}\n")
+        body_feasibility = feasibility_notes + sustainability_notes
+        if body_feasibility:
+            md_lines.append("🔍**【勝率改善注記（実施体制・自走性）】**")
+            for _nt in body_feasibility:
+                md_lines.append(f"- {_nt}")
         md_lines.append("")
 
         # 5. 期待される成果 (KPI)
@@ -739,7 +765,8 @@ class ProposalGenerator:
         template_xlsx: Optional[str] = None,
         strict: bool = False,
         markdown_only: bool = False,
-        output_dir: str = ".output"
+        output_dir: str = ".output",
+        win_rate_notes: Optional[list] = None
     ) -> Dict[str, Any]:
         """メイン実行フロー (SKILL.md 7 ステップ準拠)"""
         out_path = Path(output_dir)
@@ -747,6 +774,9 @@ class ProposalGenerator:
 
         # Step 1: データ統合 & 自動補完
         data = self.fetch_data(org_id, grant_id, strict=strict)
+        if win_rate_notes:
+            # predict_win_rate の improvement_notes を注入 (spec §6)
+            data["win_rate_notes"] = win_rate_notes
 
         # Step 2: 6大セクション自動起草
         md_content, meta = self.generate_draft_sections(data)
@@ -822,8 +852,14 @@ def main():
     parser.add_argument("--strict", action="store_true", help="Strict mode: fail on missing data")
     parser.add_argument("--markdown-only", action="store_true", help="Output Markdown only (skip Office)")
     parser.add_argument("--output-dir", type=str, default=".output", help="Output directory")
+    parser.add_argument("--win-rate-notes", type=str, default=None,
+                        help="predict_win_rate の improvement_notes JSON (spec §6)。該当セクションへ🔍勝率改善注記を追記")
 
     args = parser.parse_args()
+
+    win_rate_notes = None
+    if args.win_rate_notes:
+        win_rate_notes = json.loads(args.win_rate_notes)
 
     try:
         generator = ProposalGenerator(DATABASE_URL)
@@ -835,7 +871,8 @@ def main():
             template_xlsx=args.template_xlsx,
             strict=args.strict,
             markdown_only=args.markdown_only,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            win_rate_notes=win_rate_notes
         )
 
         print("\n==================================================")

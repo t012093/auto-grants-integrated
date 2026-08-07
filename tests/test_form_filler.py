@@ -50,6 +50,62 @@ class TestProposalDraftGeneration:
         assert "💡 **[要確認: 公募要領に事業期間の明確な記載がないため" in md_content
 
 
+class TestWinRateFeedbackLoop:
+    """Phase B: predict_win_rate の弱点改善注記 → form_filler フィードバック (spec §6)"""
+
+    def _make_data_with_notes(self, win_rate_notes):
+        generator = ProposalGenerator(db_url=None)
+        data = generator.fetch_data("org-123", "g-456", strict=False)
+        data["win_rate_notes"] = win_rate_notes
+        return generator, data
+
+    def test_severity_note_injected_into_background_section(self):
+        """深刻さの改善注記は §1 背景・社会的課題 に挿入される"""
+        notes = [{"axis": "severity", "note": "事業背景に統計・当事者ニーズのエビデンス引用を推奨"}]
+        generator, data = self._make_data_with_notes(notes)
+        md_content, _ = generator.generate_draft_sections(data)
+        # §1 背景セクション内に反映
+        background = md_content.split("## 2. 事業目的")[0]
+        assert "🔍**【勝率改善注記（課題の深刻さ）】**" in background
+        assert "エビデンス引用を推奨" in background
+
+    def test_feasibility_note_injected_into_implementation_section(self):
+        """実現体制の改善注記は §4 実施体制 に挿入される"""
+        notes = [{"axis": "feasibility", "note": "実施体制に連携先追加（後援名義）を推奨"}]
+        generator, data = self._make_data_with_notes(notes)
+        md_content, _ = generator.generate_draft_sections(data)
+        impl = md_content.split("## 5. 期待される成果 (KPI)")[0]
+        assert "🔍**【勝率改善注記（実施体制・自走性）】**" in impl
+        assert "連携先追加" in impl
+
+    def test_sustainability_note_injected_into_implementation_section(self):
+        """自走性の改善注記は §4 実施体制 に挿入される"""
+        notes = [{"axis": "sustainability", "note": "「事業継続・自主事業化計画」節を企画書に追記を推奨"}]
+        generator, data = self._make_data_with_notes(notes)
+        md_content, _ = generator.generate_draft_sections(data)
+        impl = md_content.split("## 5. 期待される成果 (KPI)")[0]
+        assert "🔍**【勝率改善注記（実施体制・自走性）】**" in impl
+        assert "事業継続・自主事業化計画" in impl
+
+    def test_all_notes_also_in_auto_complete_list(self):
+        """全改善注記は注記一覧(🔍【勝率改善注記:axis】)にも明示される"""
+        notes = [
+            {"axis": "severity", "note": "エビデンス引用を推奨"},
+            {"axis": "uniqueness", "note": "新規性の補強を推奨"},
+        ]
+        generator, data = self._make_data_with_notes(notes)
+        md_content, _ = generator.generate_draft_sections(data)
+        assert "🔍【勝率改善注記:severity】エビデンス引用を推奨" in md_content
+        assert "🔍【勝率改善注記:uniqueness】新規性の補強を推奨" in md_content
+
+    def test_no_notes_still_generates_six_sections(self):
+        """改善注記なしでも通常生成される"""
+        generator, data = self._make_data_with_notes([])
+        md_content, _ = generator.generate_draft_sections(data)
+        assert "## 1. 事業の背景・社会的課題" in md_content
+        assert "🔍【勝率改善注記" not in md_content
+
+
 class TestHarnessGuardVerification:
     """Harness Guard による算術・構造検証テスト"""
 
