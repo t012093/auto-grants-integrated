@@ -1,0 +1,84 @@
+{
+  "description": "task_human_ai_allocator の事業型テンプレート (ビジネスタイプ × タスク × ポジション)。spec §4/§5/§7 準拠。",
+  "version": 1,
+  "fallback_type": "GENERAL",
+  "common_tasks": [
+    {"title": "企画書本文の最終チェック・承認", "position": "PM", "tag": "HYBRID"},
+    {"title": "助成金申請書の最終提出", "position": "PM", "tag": "HYBRID"},
+    {"title": "採択結果の確認・記録", "position": "PM", "tag": "HYBRID"},
+    {"title": "実績報告書の作成・提出", "position": "PM", "tag": "HYBRID"}
+  ],
+  "business_types": {
+    "CHILDREN_CAFETERIA": {
+      "keywords": ["子ども食堂", "無料食堂", "食事支援", "テーブル"],
+      "positions": [
+        {"position_code": "PM", "position_name": "プロジェクトリーダー", "capacity": 1, "tag": "HYBRID"},
+        {"position_code": "LOCAL_DIR", "position_name": "地域・パートナー連携ディレクター", "capacity": 1, "tag": "HUMAN"},
+        {"position_code": "SITE_OP", "position_name": "現場運営・イベント担当", "capacity": 2, "tag": "HUMAN"}
+      ],
+      "tasks": [
+        {"title": "食材の仕入れ・献立の計画", "position": "SITE_OP", "tag": "HUMAN"},
+        {"title": "子ども食堂の当日調理・接客", "position": "SITE_OP", "tag": "HUMAN"},
+        {"title": "地域協力者との対面関係構築", "position": "LOCAL_DIR", "tag": "HUMAN"},
+        {"title": "行政窓口との事前相談", "position": "PM", "tag": "HUMAN"}
+      ]
+    },
+    "FARM_IT": {
+      "keywords": ["農家", "農業", "営農", "スマート農業", "ec", "出荷"],
+      "positions": [
+        {"position_code": "PM", "position_name": "プロジェクトリーダー", "capacity": 1, "tag": "HYBRID"},
+        {"position_code": "LOCAL_DIR", "position_name": "地域・パートナー連携ディレクター", "capacity": 1, "tag": "HUMAN"},
+        {"position_code": "IT_CREATOR", "position_name": "IT/EC・広報クリエイター", "capacity": 1, "tag": "HYBRID"}
+      ],
+      "tasks": [
+        {"title": "農家との対面協議・同意書押印受領", "position": "LOCAL_DIR", "tag": "HUMAN"},
+        {"title": "ECサイト・販路構築", "position": "IT_CREATOR", "tag": "HYBRID"},
+        {"title": "行政窓口との事前相談", "position": "PM", "tag": "HUMAN"}
+      ]
+    },
+    "COMMUNITY_EVENT": {
+      "keywords": ["イベント", "祭", "体験", "ワークショップ", "まつり"],
+      "positions": [
+        {"position_code": "PM", "position_name": "プロジェクトリーダー", "capacity": 1, "tag": "HYBRID"},
+        {"position_code": "SITE_OP", "position_name": "現場運営・イベント担当", "capacity": 3, "tag": "HUMAN"}
+      ],
+      "tasks": [
+        {"title": "イベント当日の現場運営・ファシリテーション", "position": "SITE_OP", "tag": "HUMAN"},
+        {"title": "会場準備・写真撮影", "position": "SITE_OP", "tag": "HUMAN"},
+        {"title": "行政・関係機関との事前調整", "position": "PM", "tag": "HUMAN"}
+      ]
+    },
+    "EDU_CLASS": {
+      "keywords": ["教室", "講座", "学習支援", "ai教室", "プログラミング"],
+      "positions": [
+        {"position_code": "PM", "position_name": "プロジェクトリーダー", "capacity": 1, "tag": "HYBRID"},
+        {"position_code": "SITE_OP", "position_name": "現場運営・講師", "capacity": 2, "tag": "HUMAN"},
+        {"position_code": "IT_CREATOR", "position_name": "IT/EC・広報クリエイター", "capacity": 1, "tag": "HYBRID"}
+      ],
+      "tasks": [
+        {"title": "教室のカリキュラム設計・教材作成", "position": "SITE_OP", "tag": "HYBRID"},
+        {"title": "教室の当日運営・講師", "position": "SITE_OP", "tag": "HUMAN"},
+        {"title": "IT教材・環境構築", "position": "IT_CREATOR", "tag": "HYBRID"}
+      ]
+    },
+    "DIGITAL_INFRA": {
+      "keywords": ["システム", "web", "dx", "デジタル基盤", "クラウド"],
+      "positions": [
+        {"position_code": "PM", "position_name": "プロジェクトリーダー", "capacity": 1, "tag": "HYBRID"},
+        {"position_code": "IT_CREATOR", "position_name": "IT/EC・広報クリエイター", "capacity": 2, "tag": "HYBRID"}
+      ],
+      "tasks": [
+        {"title": "システム基盤の構築・設計", "position": "IT_CREATOR", "tag": "HYBRID"},
+        {"title": "Web/クラウド環境の構築", "position": "IT_CREATOR", "tag": "HYBRID"},
+        {"title": "行政・調整機関との事前相談", "position": "PM", "tag": "HUMAN"}
+      ]
+    },
+    "GENERAL": {
+      "keywords": [],
+      "positions": [
+        {"position_code": "PM", "position_name": "プロジェクトリーダー", "capacity": 1, "tag": "HYBRID"}
+      ],
+      "tasks": []
+    }
+  }
+}
