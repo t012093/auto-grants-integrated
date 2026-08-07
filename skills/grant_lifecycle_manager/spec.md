@@ -223,9 +223,11 @@
 
 `generate_proposal_docx.py`（実装済み）の「💡 自動補完注記」機構を拡張し、勝率の弱点を反映する。
 
-1. `predict_win_rate` が `improvement_notes` を出力
-2. `generate_proposal_docx --win-rate <notes>` が該当セクションへ**改善注記を追記**
-3. 対象セクション例:
+1. `predict_win_rate` が `improvement_notes` を計算し `grant_win_rank` に保存
+2. `generate_proposal_docx` が **`grant_win_rank` から自動取得**（真の閉ループ。人の手を介さない）
+   - 自動パス: `fetch_data` 内で `grant_win_rank.improvement_notes` を読み込み該当セクションへ反映
+   - 明示パス: `--win-rate-notes '<JSON>'` を渡すと自動取得値を**上書き**（検証・手動調整用）
+3. 該当セクション例:
    - 自走性 → 「4. 実施体制」内 / 「事業の持続性」脚注
    - 実現体制 → 「4. 実施体制・役割分担」の連携先行
    - 深刻さ → 「1. 事業の背景・社会的課題」のエビデンス引用補強

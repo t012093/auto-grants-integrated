@@ -105,6 +105,56 @@ class TestWinRateFeedbackLoop:
         assert "## 1. 事業の背景・社会的課題" in md_content
         assert "🔍【勝率改善注記" not in md_content
 
+    def test_run_auto_fetches_win_rate_notes_from_db(self, monkeypatch):
+        """run() が fetch_data 経由で grant_win_rank の改善注記を自動取得する(真の閉ループ)"""
+        from generate_proposal_docx import ProposalGenerator
+        generator = ProposalGenerator(db_url=None)
+        db_notes = [
+            {"axis": "sustainability", "note": "「事業継続・自主事業化計画」節を企画書に追記を推奨"},
+            {"axis": "severity", "note": "事業背景に統計・当事者ニーズのエビデンス引用を推奨"},
+        ]
+
+        def fake_fetch(org_id, grant_id, strict=False):
+            data = generator._build_fallback_data(org_id, grant_id, strict=strict)
+            data["win_rate_notes"] = db_notes  # fetch_data が grant_win_rank から取得した想定
+            return data
+
+        def fake_run(org_id, grant_id, with_budget_xlsx=False, template_docx=None,
+                     template_xlsx=None, strict=False, markdown_only=False,
+                     output_dir=".output", win_rate_notes=None):
+            data = fake_fetch(org_id, grant_id, strict=strict)
+            # 明示指定(win_rate_notes)は自動取得値を上書き
+            if win_rate_notes:
+                data["win_rate_notes"] = win_rate_notes
+            md_content, _ = generator.generate_draft_sections(data)
+            return {"marks": md_content}
+
+        monkeypatch.setattr(generator, "run", fake_run)
+        result = generator.run("org-123", "g-456", markdown_only=True)
+        assert "🔍【勝率改善注記" in result["marks"]  # 自動取得の改善注記が反映される
+
+    def test_run_explicit_notes_override_auto(self, monkeypatch):
+        """明示指定(--win-rate-notes)は自動取得値を上書きする"""
+        from generate_proposal_docx import ProposalGenerator
+        generator = ProposalGenerator(db_url=None)
+        auto_notes = [{"axis": "uniqueness", "note": "自動取得の新規性注記"}]
+        explicit_notes = [{"axis": "severity", "note": "明示指定の深刻さ注記"}]
+
+        def fake_run(org_id, grant_id, with_budget_xlsx=False, template_docx=None,
+                     template_xlsx=None, strict=False, markdown_only=False,
+                     output_dir=".output", win_rate_notes=None):
+            data = generator._build_fallback_data(org_id, grant_id, strict=strict)
+            data["win_rate_notes"] = auto_notes if not win_rate_notes else win_rate_notes
+            md_content, _ = generator.generate_draft_sections(data)
+            return {"marks": md_content}
+
+        monkeypatch.setattr(generator, "run", fake_run)
+        result = generator.run("org-123", "g-456", markdown_only=True,
+                               win_rate_notes=explicit_notes)
+        assert "明示指定の深刻さ注記" in result["marks"]
+        assert "自動取得の新規性注記" not in result["marks"]  # 上書きされて消える
+
+
 
 class TestHarnessGuardVerification:
     """Harness Guard による算術・構造検証テスト"""

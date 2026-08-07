@@ -121,6 +121,22 @@ class ProposalGenerator:
                     analyzer = PastAwardAnalyzer(db_url=self.db_url)
                     analysis_summary = analyzer.analyze_records(past_award_rows)
 
+                    # 5. Win-rate improvement_notes (spec §6: 真の閉ループ)
+                    #    predict_win_rate が grant_win_rank に保存した弱点改善注記を自動取得。
+                    #    ※ --win-rate-notes で明示指定された場合のみ上書きされる。
+                    win_rate_notes = []
+                    try:
+                        cur.execute(
+                            "SELECT improvement_notes FROM public.grant_win_rank "
+                            "WHERE npo_profile_id = %s AND grant_id = %s ORDER BY updated_at DESC LIMIT 1",
+                            (org_id, db_grant_id),
+                        )
+                        row = cur.fetchone()
+                        if row and row["improvement_notes"]:
+                            win_rate_notes = row["improvement_notes"]
+                    except Exception:
+                        pass  # テーブル未作成等は黙って空にする
+
                     return {
                         "npo": npo,
                         "grant": grant,
@@ -129,6 +145,7 @@ class ProposalGenerator:
                         "past_awards": past_award_rows,
                         "analysis_summary": analysis_summary,
                         "notes": [],
+                        "win_rate_notes": win_rate_notes,
                     }
 
         except Exception as e:
