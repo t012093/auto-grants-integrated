@@ -152,9 +152,11 @@
 - 各タスクのタグは、`initial_tasks_json` の各要素に `{title, tag}` として保持。
 
 ### 8.2 冪等性
-- 同一 `proposal_id` に対する再実行は、既存 `proposal_project_offers` を**一旦削除して再作成**（DESELECT & INSERT）か、
-  `position_code` で Upsert する。方針は `--reset` フラグで選択可。
-- デフォルトは **Upsert（position_code 単位で上書き）**。
+- 同一 `proposal_id` に対する再実行は、`position_code` 単位の **手動 Upsert**（既存→UPDATE / 不在→INSERT）。
+  `proposal_project_offers` に UNIQUE 制約が無いため ON CONFLICT は使わない。
+- **デフォルト（非 reset）**: 設計に無い既存ポジションは**残したまま**（既存3件 + 新規追加で肥大化しうる）。
+- **`--reset`**: 当該 proposal の既存オファーを**一括削除してから再生成**（事業型が変わった場合の推奨）。
+- 実運用で事業型テンプレートが変わった場合は `--reset` を使い、古いポジションが残るのを防ぐ。
 
 ---
 
