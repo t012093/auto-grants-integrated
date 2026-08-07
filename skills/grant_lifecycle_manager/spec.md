@@ -318,7 +318,8 @@ CREATE TABLE IF NOT EXISTS public.grant_applications (
   appeared_at    date,          -- 申請提出日
   result         text,          -- AWARDED / REJECTED / PENDING
   reject_reason  text,          -- 不採択理由（任意）
-  created_at     timestamptz DEFAULT NOW()
+  created_at     timestamptz DEFAULT NOW(),
+  UNIQUE (npo_profile_id, grant_id)  -- 採択結果の冪等 Upsert 用 (record_application_result)
 );
 ```
 
